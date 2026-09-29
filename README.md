@@ -113,8 +113,11 @@ python ue3gt.py  ../dumps/CUSA02231/dump.bin 192.168.x.y PlayerController.CheatM
 
 ## Samples
 
-`samples/` contains generated SDKs (GameDefines.hpp, headers, offsets.json, GObjects.txt, ReClass project) for
-Dishonored DE (UE3), Days Gone (UE 4.11), Tiny Tina's Wonderlands (UE 4.20) and High on Life (UE5), one zip each.
+`samples/` contains the generated SDKs (GameDefines.hpp, headers, offsets.json, GObjects.txt, ReClass project)
+for 22 games, one 7z archive per game, named `<TitleID>-<Game> <Version>.7z`. UE3: Thief, Sherlock Holmes
+(2), Life is Strange, Borderlands 2 / Pre-Sequel, Dishonored, THPS5, AC Chronicles, Mass Effect LE 1-3.
+UE4/UE5: FF7 Remake, Days Gone, SAO Fatal Bullet / Last Recollection, Jedi Fallen Order, Hogwarts Legacy,
+WWE 2K Battlegrounds, Tiny Tina's Wonderlands, The Quarry, High on Life.
 
 ## Crash diagnosis
 
