@@ -185,7 +185,7 @@ class Engine:
 
     # ---- offset finder primitives ------------------------------------------------------------------------------
     def find_offset(self, pairs, fmt, lo=0x28, hi=0x1A0, step=4):
-        pairs = [(a, v) for a, v in pairs if a]
+        pairs = [(a, v) for a, v in pairs if a and v is not None]   # v None would "match" unreadable memory
         if not pairs:
             return NOTFOUND
         best, found, i = lo, False, 0
@@ -199,6 +199,15 @@ class Engine:
                         best, i = j, 0
                     break
         return best if found else NOTFOUND
+
+    def children_by_outer(self, structs, lo=0x28, hi=0x1A0):
+        """Fallback for UStruct::Children: lowest pointer slot holding an object whose Outer is the struct itself.
+        Needed when a licensee engine adds functions, so the list head is not the stock one find_offset looks for."""
+        structs = [s for s in structs if s]
+        for j in range(lo, hi, 8):
+            if sum(1 for s in structs if (p := self.ptr(s + j)) and self.outer(p) == s) >= 2:
+                return j
+        return NOTFOUND
 
     def valid_ptr_offset(self, a, b, start, hi, in_exe=False):
         if not a or not b:
@@ -344,6 +353,12 @@ class Engine:
             pairs = [(self.find("PlayerController"), self.find_in_outer("WasInputKeyJustReleased", "PlayerController")),
                      (self.find("Controller"), self.find_in_outer("UnPossess", "Controller"))]
             O["UStruct_Children"] = self.find_offset(pairs, "<Q")
+        if O["UStruct_Children"] is NOTFOUND:
+            log("UStruct::Children: stock list heads not matched, trying by Outer; had " +
+                ", ".join(f"{self.fullname(s) if s else None} -> {self.fullname(c) if c else None}" for s, c in pairs))
+            O["UStruct_Children"] = self.children_by_outer([s for s, _ in pairs] + [actor, self.find("KismetSystemLibrary")])
+            if O["UStruct_Children"] is NOTFOUND:
+                sys.exit("UStruct::Children not found (send the log lines above)")
         log(f"UStruct::Children {O['UStruct_Children']:#x}  FProperty={self.use_fproperty}")
 
         hi = max(O["UObject_Index"], O["UObject_Name"], O["UObject_Flags"], O["UObject_Outer"], O["UObject_Class"])
@@ -473,7 +488,7 @@ class Engine:
         while i >= 0:
             o = self.arr.get(i)
             i -= 1
-            if not o:
+            if not o or self.index(o) != i + 1:     # stale slot: its garbage name index would inflate the bits
                 continue
             blk = (self.i32(o + self.O["UObject_Name"]) or 0) >> self.pool.block_bits
             if blk == self.pool.current_block:

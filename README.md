@@ -8,11 +8,11 @@ Tested: Jedi Fallen Order (UE 4.21), Hogwarts Legacy (UE 4.27 custom), The Quarr
 Lollipop Chainsaw RePop (UE 5.2), Days Gone (UE 4.11), SAO Last Recollection (UE4), FF7 Remake (UE 4.18),
 Fatal Bullet (UE 4.15), WWE 2K Battlegrounds (UE4), Dishonored Definitive Edition (UE3), Thief (UE3),
 Borderlands 2 / Pre-Sequel (UE3 Gearbox), Mass Effect Legendary Edition 1-3 (UE3 with BioWare name pool,
-detected automatically), Tiny Tina's Wonderlands (UE 4.20), High on Life (UE5).
+detected automatically), Tiny Tina's Wonderlands (UE 4.20), High on Life (UE5), Duskfade (PS5, UE 5.1+).
 
 ## Requirements
 
-- Python 3.12, `pip install ps4debug` (PyPI). Optional `capstone` for code analysis.
+- Python 3.12, `pip install ps4debug` (PyPI). Optional `capstone` for code analysis, `numpy` for `uediff`.
 - PS4 with GoldHEN and ps4debug (or ps4debug-ng) running, reachable over the network.
 - The game must have a level loaded. **The pause menu is fine**: a dump taken in the pause menu yields the
   same offsets, classes and objects as one taken in the running scene. Only the main menu lacks level
@@ -64,6 +64,14 @@ structs of 1.8 GB. Old headers stay in the output folder on regeneration, delete
 | `ue4gt.py dump.bin IP <0xADDR\|Class> Function [Param=Value\|local:Local ...] carrier=Class.ExecuteUbergraph_X [then=...]` | **UE4/5:** run a function on the game thread through a ticking Blueprint Ubergraph. Under Git Bash set `MSYS_NO_PATHCONV=1`, otherwise `/Game/` paths get rewritten |
 | `uecheat.py dump.bin out.TLH ["Name=Path=Value" \| "Name=button=Path.Function"]` | generates a trainer file for a separate in-game cheat menu PRX (not part of this repo) |
 | `ps4prx.py IP load\|unload\|list ...` | load, unload or list PRX modules in the running game (ps4debug-ng + GoldHEN FTP) |
+
+Contributed extras (by Stoned):
+
+| Tool | Purpose |
+|---|---|
+| `uediff.py A.bin B.bin [C.bin] --type float --rel dec[,inc] [--v0 100 --v1 75] [--owner Regex]` | compare two or more dumps like a "next scan" and resolve every hit to its UObject and property. Needs `numpy` |
+| `uediff.py --xref dump.bin --disp 0x2A8 [--write] [--mnem mov,vmovss]` | list the instructions in the game image that access a struct offset. Needs `capstone` |
+| `peek.py read\|write\|freeze\|watch\|trace 0xADDR [value] --host IP [--type float]` (or set `PS4_HOST`) | raw live memory access; `trace` sets a hardware write watchpoint and reports the writing instruction (experimental, needs `capstone`) |
 
 Examples:
 
@@ -130,6 +138,7 @@ addresses from `GameDefines.hpp` and the dump the location can be resolved offli
   follow its OffsetFinder and were the reference for the UE4/UE5 object model.
 - [ps4debug](https://github.com/jogolden/ps4debug) / ps4debug-ng and the `ps4debug` Python package.
 - SDK output uses the CodeRed header layout.
+- Stoned: `uediff.py` and `peek.py`.
 
 ## License
 
