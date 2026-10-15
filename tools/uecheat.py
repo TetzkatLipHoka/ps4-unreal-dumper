@@ -16,7 +16,7 @@ import json, os, struct, sys
 import ueobj
 from ueobj import CF
 
-CELL = dict(FloatProperty=("Single", 4, "edx"), IntProperty=("Integer", 4, "edx"), UInt32Property=("Cardinal", 4, "edx"),
+CELL = dict(FloatProperty=("Single", 4, "edx"), DoubleProperty=("Double", 8, "rdx"), IntProperty=("Integer", 4, "edx"), UInt32Property=("Cardinal", 4, "edx"),
             ByteProperty=("Byte", 1, "dl"), Int8Property=("Byte", 1, "dl"))
 DEFAULT = ["God=bCanBeDamaged=0", "Player time=CustomTimeDilation=1", "Walk speed=CharacterMovement.MaxWalkSpeed=600"]
 CALLER_SAVED = ["rsi", "rdi", "r8", "r9", "r10", "r11"]      # rax/rcx/rdx are saved by the cave prologue
@@ -186,7 +186,7 @@ def main(dump, out, *specs):
             code += [f"mov {vreg}, [Val{k}]", f"mov [{reg}+{off:#x}], {vreg}"]
             entries.append(f"      <Symbol>Val{k}</Symbol>\n      <Type>Value</Type>\n      <ValueType>{vt}</ValueType>\n      <Value>{value}</Value>")
         else:
-            sys.exit(f"{segs[-1]}: {kind} not supported (bool/int/float/byte only)")
+            sys.exit(f"{segs[-1]}: {kind} not supported (bool/int/float/double/byte only)")
         pawn_blocks.append("\n".join([f"cmp byte ptr [Flag{k}], 1", f"jne c{k}_end"] + code + [f"c{k}_end:"]))
         cheats.append((name, entries))
         print(f"{name}: pawn.{path} ({kind} +{off:#x}) = {value}")
