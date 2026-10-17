@@ -3,6 +3,7 @@
     python uecheat.py <dump.bin> <out.TLH> "Name=Path=Value" ...              # Path relative to the player pawn
       "God=bCanBeDamaged=0"  "Player time=CustomTimeDilation=2"  "Walk speed=CharacterMovement.MaxWalkSpeed=1200"
       "Anim speed=Mesh.AnimScriptInstance:BendPlayerAnimInstance.LocationBasedSpeedScale=2"   (Prop:Class = downcast)
+      "Inf Hp=HealthComponent.HealthSet.Damage.CurrentValue=0"   (struct members inline: HealthSet, Damage)
     python uecheat.py <dump.bin> <out.TLH> "Name=button=World.AuthorityGameMode.weak:0xbfc.ToggleCheatMenu"
       button = call a native UFunction's C++ implementation once each time the cheat is switched on. Object path from
       World (GWorld) or Pawn; hops: property name, +0xNN (raw pointer), weak:0xNN (TWeakObjectPtr {Index, Serial}).
@@ -100,7 +101,7 @@ def xml_escape(s):
 
 
 def hop_code(e, cls, tok, reg, fail):
-    """Assembly for one object hop in `reg`; returns (lines, class after the hop or None)."""
+    """Assembly for one object/struct hop in `reg`; returns (lines, class/struct after the hop or None)."""
     if tok.startswith("weak:"):                                  # TWeakObjectPtr {int32 Index; int32 Serial} -> GObjects item
         off = int(tok[5:], 0)
         return [f"movsxd rdx, dword ptr [{reg}+{off:#x}]", "test rdx, rdx", f"js {fail}",
@@ -112,10 +113,13 @@ def hop_code(e, cls, tok, reg, fail):
         return [f"mov {reg}, [{reg}+{int(tok, 0):#x}]", f"test {reg}, {reg}", f"jz {fail}"], None
     name, _, cast = tok.partition(":")                            # "AnimScriptInstance:BendPlayerAnimInstance" = downcast
     p = member(e, cls or sys.exit(f"{tok}: class unknown after a raw hop, use +0xNN"), name)
-    if e.ffield_class_name(p) not in ("ObjectProperty", "WeakObjectProperty"):
-        sys.exit(f"{name} is {e.ffield_class_name(p)}, expected an object pointer")
+    kind, off = e.ffield_class_name(p), e.prop_offset(p)
+    if kind == "StructProperty":                                  # inline struct: no pointer, just advance (talixme)
+        return [f"add {reg}, {off:#x}"], e.ptr(p + e.O["StructProperty_Struct"])
+    if kind not in ("ObjectProperty", "WeakObjectProperty"):
+        sys.exit(f"{name} is {kind}, expected an object pointer or struct")
     nxt = cls_of(e, cast) if cast else e.ptr(p + e.O["ObjectProperty_Class"])
-    return [f"mov {reg}, [{reg}+{e.prop_offset(p):#x}]", f"test {reg}, {reg}", f"jz {fail}"], nxt
+    return [f"mov {reg}, [{reg}+{off:#x}]", f"test {reg}, {reg}", f"jz {fail}"], nxt
 
 
 def main(dump, out, *specs):
@@ -166,7 +170,7 @@ def main(dump, out, *specs):
             continue
         segs = path.split(".")
         cls, code, reg = pawn_cls, [], "rax"
-        for seg in segs[:-1]:                                     # object hops: ObjectProperty -> its class
+        for seg in segs[:-1]:                                     # hops: ObjectProperty -> its class, StructProperty -> its struct
             if reg == "rax":
                 code.append("mov rcx, rax"); reg = "rcx"
             lines, cls = hop_code(e, cls, seg, reg, f"c{k}_end"); code += lines
