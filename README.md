@@ -63,6 +63,7 @@ structs of 1.8 GB. Old headers stay in the output folder on regeneration, delete
 | `ue3gt.py dump.bin IP <0xADDR\|Class\|Class.Property> Function [Param=Value ...]` | **UE3:** run a script function on the game thread (see below) |
 | `ue4gt.py dump.bin IP <0xADDR\|Class> Function [Param=Value\|local:Local ...] carrier=Class.ExecuteUbergraph_X [then=...]` | **UE4/5:** run a function on the game thread through a ticking Blueprint Ubergraph. Under Git Bash set `MSYS_NO_PATHCONV=1`, otherwise `/Game/` paths get rewritten |
 | `uecheat.py dump.bin out.TLH ["Name=Path=Value" \| "Name=button=Path.Function"]` | generates a trainer file for a separate in-game cheat menu PRX (not part of this repo) |
+| `uecheat.py dump.bin --find Damage [depth]` | lists ready-to-use paths from the dump's live player pawn (e.g. `HealthComponent.HealthSet.Damage.CurrentValue`) with type and current value |
 | `ps4prx.py IP load\|unload\|list ...` | load, unload or list PRX modules in the running game (ps4debug-ng + GoldHEN FTP) |
 
 Contributed extras (by Stoned):

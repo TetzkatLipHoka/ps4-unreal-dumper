@@ -4,6 +4,8 @@
       "God=bCanBeDamaged=0"  "Player time=CustomTimeDilation=2"  "Walk speed=CharacterMovement.MaxWalkSpeed=1200"
       "Anim speed=Mesh.AnimScriptInstance:BendPlayerAnimInstance.LocationBasedSpeedScale=2"   (Prop:Class = downcast)
       "Inf Hp=HealthComponent.HealthSet.Damage.CurrentValue=0"   (struct members inline: HealthSet, Damage)
+    python uecheat.py <dump.bin> --find Damage [depth]   # list ready-to-use paths whose name contains the word (default depth 4)
+      walks the dump's live player pawn (real component classes, downcasts added), prints path, type and dump value
     python uecheat.py <dump.bin> <out.TLH> "Name=button=World.AuthorityGameMode.weak:0xbfc.ToggleCheatMenu"
       button = call a native UFunction's C++ implementation once each time the cheat is switched on. Object path from
       World (GWorld) or Pawn; hops: property name, +0xNN (raw pointer), weak:0xNN (TWeakObjectPtr {Index, Serial}).
@@ -20,6 +22,7 @@ from ueobj import CF
 CELL = dict(FloatProperty=("Single", 4, "edx"), DoubleProperty=("Double", 8, "rdx"), IntProperty=("Integer", 4, "edx"), UInt32Property=("Cardinal", 4, "edx"),
             ByteProperty=("Byte", 1, "dl"), Int8Property=("Byte", 1, "dl"))
 DEFAULT = ["God=bCanBeDamaged=0", "Player time=CustomTimeDilation=1", "Walk speed=CharacterMovement.MaxWalkSpeed=600"]
+FMT = dict(FloatProperty="<f", DoubleProperty="<d", IntProperty="<i", UInt32Property="<I", ByteProperty="<B", Int8Property="<b")
 CALLER_SAVED = ["rsi", "rdi", "r8", "r9", "r10", "r11"]      # rax/rcx/rdx are saved by the cave prologue
 
 
@@ -46,8 +49,8 @@ def cls_of(e, name):
     return e.find(name, CF["Class"]) or sys.exit(f"class {name} not found")
 
 
-def player_pawn_class(e, pawn_off):
-    """Class of the pawn a live PlayerController owns in the dump (most-derived start for property paths)."""
+def player_pawn(e, pawn_off):
+    """The pawn a live PlayerController owns in the dump (its class = most-derived start for property paths)."""
     pc = e.find("PlayerController", CF["Class"])
     def is_pc(c):
         while c:
@@ -58,7 +61,42 @@ def player_pawn_class(e, pawn_off):
         if not (e.flags(o) or 0) & ueobj.RF_ClassDefaultObject and is_pc(e.cls(o)):
             pawn = e.ptr(o + pawn_off)
             if pawn and e.cls(pawn):
-                return e.cls(pawn)
+                return pawn
+
+
+def find_paths(e, pawn, word, depth=4):
+    """BFS over the live pawn: (path, kind, dump value) for every bool/number member whose name, or the name of a struct
+    it sits in, contains `word` (object names earlier in the path don't count: that would list whole components).
+    Object hops use the instance's real class (":Class" downcast when it differs from the declared one)."""
+    word, seen, todo, hits = word.lower(), {pawn}, [(pawn, e.cls(pawn), "", "")], []
+    for _ in range(depth + 1):
+        nxt = []
+        for addr, st, path, local in todo:                       # local = struct names since the last object hop
+            c = st
+            while c:
+                for p in e.properties(c):
+                    name, kind = e.ffield_name(p) or "?", e.ffield_class_name(p)
+                    a, full = addr + e.prop_offset(p), path + name
+                    if kind in FMT or kind == "BoolProperty":
+                        if word in (local + name).lower():
+                            if kind == "BoolProperty":
+                                _, boff, mask, _ = e.bool_info(p)
+                                v = int(bool((e.val(a + boff, "<B") or 0) & mask))
+                            else:
+                                v = e.val(a, FMT[kind])
+                            hits.append((full, kind, v))
+                    elif kind == "StructProperty":
+                        nxt.append((a, e.ptr(p + e.O["StructProperty_Struct"]), full + ".", local + name + "."))
+                    elif kind == "ObjectProperty":
+                        o = e.ptr(a)
+                        rc = o and o not in seen and e.cls(o)
+                        if rc and e.name(rc):
+                            seen.add(o)
+                            dc = e.ptr(p + e.O["ObjectProperty_Class"])
+                            nxt.append((o, rc, full + ("" if rc == dc else f":{e.name(rc)}") + ".", ""))
+                c = e.super(c)
+        todo = nxt
+    return hits
 
 
 def native_impl(e, fn):
@@ -124,6 +162,16 @@ def hop_code(e, cls, tok, reg, fail):
 
 def main(dump, out, *specs):
     e = ueobj.open_engine(dump, log=lambda *a: None)
+    hop = lambda cls, prop: e.prop_offset(member(e, cls_of(e, cls), prop))
+    chain = [("World", "OwningGameInstance"), ("GameInstance", "LocalPlayers"), ("Player", "PlayerController"), ("Controller", "Pawn")]
+    o_gi, o_lp, o_pc, o_pawn = (hop(c, p) for c, p in chain)
+    pawn = player_pawn(e, o_pawn)
+    if out == "--find":
+        pawn or sys.exit("no live player pawn in this dump (dump in-game, not in a menu)")
+        print(f"player pawn class in dump: {e.name(e.cls(pawn))}")
+        for path, kind, v in find_paths(e, pawn, specs[0], int(specs[1]) if len(specs) > 1 else 4):
+            print(f"{path}	{kind}	{v}")
+        return
     sdk = os.path.join(os.path.dirname(dump), "SDK", "offsets.json")
     meta = json.load(open(sdk))
     if not meta.get("gworld") or not meta.get("process_event"):
@@ -132,10 +180,7 @@ def main(dump, out, *specs):
     cusa = int(info["title_id"][4:]) if info["title_id"].startswith("CUSA") else 0
     pe = e.d.base + meta["process_event"]
     O = e.O
-    hop = lambda cls, prop: e.prop_offset(member(e, cls_of(e, cls), prop))
-    chain = [("World", "OwningGameInstance"), ("GameInstance", "LocalPlayers"), ("Player", "PlayerController"), ("Controller", "Pawn")]
-    o_gi, o_lp, o_pc, o_pawn = (hop(c, p) for c, p in chain)
-    pawn_cls = player_pawn_class(e, o_pawn) or cls_of(e, "Pawn")
+    pawn_cls = e.cls(pawn) if pawn else cls_of(e, "Pawn")
     world_cls = cls_of(e, "World")
     print(f"player pawn class in dump: {e.name(pawn_cls)}")
 
