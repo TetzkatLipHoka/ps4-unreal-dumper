@@ -13,7 +13,7 @@ CF = dict(Field=1 << 0, Enum=1 << 2, Struct=1 << 3, ScriptStruct=1 << 4, Class=1
           Function=1 << 19, StructProperty=1 << 20, ArrayProperty=1 << 21, DelegateProperty=1 << 23,
           NumericProperty=1 << 24, MulticastDelegateProperty=1 << 25, ObjectPropertyBase=1 << 26,
           WeakObjectProperty=1 << 27, LazyObjectProperty=1 << 28, SoftObjectProperty=1 << 29, TextProperty=1 << 30,
-          SoftClassProperty=1 << 33, Package=1 << 34, Level=1 << 35, Actor=1 << 36, MapProperty=1 << 46,
+          SoftClassProperty=1 << 33, Package=1 << 34, Level=1 << 35, Actor=1 << 36, Pawn=1 << 38, MapProperty=1 << 46,
           SetProperty=1 << 47, EnumProperty=1 << 48, MulticastInlineDelegateProperty=1 << 50,
           MulticastSparseDelegateProperty=1 << 51, FieldPathProperty=1 << 52, OptionalProperty=1 << 56)
 # EFunctionFlags

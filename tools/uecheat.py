@@ -4,6 +4,7 @@
       "God=bCanBeDamaged=0"  "Player time=CustomTimeDilation=2"  "Walk speed=CharacterMovement.MaxWalkSpeed=1200"
       "Anim speed=Mesh.AnimScriptInstance:BendPlayerAnimInstance.LocationBasedSpeedScale=2"   (Prop:Class = downcast)
       "Inf Hp=HealthComponent.HealthSet.Damage.CurrentValue=0"   (struct members inline: HealthSet, Damage)
+      "Hp=AbilitySystemComponent.SpawnedAttributes[3]:ATR_Health.Health.CurrentValue=500"   (TArray<UObject*> element)
     python uecheat.py <dump.bin> --find Damage [depth]   # list ready-to-use paths whose name contains the word (default depth 4)
       walks the dump's live player pawn (real component classes, downcasts added), prints path, type and dump value
     python uecheat.py <dump.bin> <out.TLH> "Name=button=World.AuthorityGameMode.weak:0xbfc.ToggleCheatMenu"
@@ -75,7 +76,7 @@ def find_paths(e, pawn, word, depth=4):
             c = st
             while c:
                 for p in e.properties(c):
-                    name, kind = e.ffield_name(p) or "?", e.ffield_class_name(p)
+                    objs, name, kind = [], e.ffield_name(p) or "?", e.ffield_class_name(p)
                     a, full = addr + e.prop_offset(p), path + name
                     if kind in FMT or kind == "BoolProperty":
                         if word in (local + name).lower():
@@ -88,12 +89,18 @@ def find_paths(e, pawn, word, depth=4):
                     elif kind == "StructProperty":
                         nxt.append((a, e.ptr(p + e.O["StructProperty_Struct"]), full + ".", local + name + "."))
                     elif kind == "ObjectProperty":
-                        o = e.ptr(a)
+                        objs = [(e.ptr(a), full, e.ptr(p + e.O["ObjectProperty_Class"]))]
+                    elif kind == "ArrayProperty":                # TArray<UObject*>: every element, as Name[i]
+                        inner = e.ptr(p + e.O["ArrayProperty_Inner"])
+                        data, n = e.ptr(a), e.i32(a + 8) or 0
+                        if data and e.ffield_class_name(inner) == "ObjectProperty":
+                            dc = e.ptr(inner + e.O["ObjectProperty_Class"])
+                            objs = [(e.ptr(data + 8 * i), f"{full}[{i}]", dc) for i in range(min(n, 64))]
+                    for o, seg, dc in objs:
                         rc = o and o not in seen and e.cls(o)
-                        if rc and e.name(rc):
+                        if rc and e.name(rc) and not e.isa(o, CF["Pawn"]):   # other pawns (enemies, NPCs) are noise
                             seen.add(o)
-                            dc = e.ptr(p + e.O["ObjectProperty_Class"])
-                            nxt.append((o, rc, full + ("" if rc == dc else f":{e.name(rc)}") + ".", ""))
+                            nxt.append((o, rc, seg + ("" if rc == dc else f":{e.name(rc)}") + ".", ""))
                 c = e.super(c)
         todo = nxt
     return hits
@@ -150,8 +157,18 @@ def hop_code(e, cls, tok, reg, fail):
     if tok.startswith("+"):
         return [f"mov {reg}, [{reg}+{int(tok, 0):#x}]", f"test {reg}, {reg}", f"jz {fail}"], None
     name, _, cast = tok.partition(":")                            # "AnimScriptInstance:BendPlayerAnimInstance" = downcast
+    name, _, idx = name.rstrip("]").partition("[")                # "SpawnedAttributes[3]" = TArray element
     p = member(e, cls or sys.exit(f"{tok}: class unknown after a raw hop, use +0xNN"), name)
     kind, off = e.ffield_class_name(p), e.prop_offset(p)
+    if idx:
+        # ponytail: fixed index, taken from the dump; arrays filled in a different order need a class check at runtime
+        i, inner = int(idx, 0), e.ptr(p + e.O["ArrayProperty_Inner"])
+        if kind != "ArrayProperty" or e.ffield_class_name(inner) != "ObjectProperty":
+            sys.exit(f"{name} is {kind}, [i] needs a TArray of object pointers")
+        nxt = cls_of(e, cast) if cast else e.ptr(inner + e.O["ObjectProperty_Class"])
+        return [f"cmp dword ptr [{reg}+{off + 8:#x}], {i}", f"jle {fail}",               # TArray {Data, Num, Max}
+                f"mov {reg}, [{reg}+{off:#x}]", f"test {reg}, {reg}", f"jz {fail}",
+                f"mov {reg}, [{reg}+{8 * i:#x}]", f"test {reg}, {reg}", f"jz {fail}"], nxt
     if kind == "StructProperty":                                  # inline struct: no pointer, just advance (talixme)
         return [f"add {reg}, {off:#x}"], e.ptr(p + e.O["StructProperty_Struct"])
     if kind not in ("ObjectProperty", "WeakObjectProperty"):

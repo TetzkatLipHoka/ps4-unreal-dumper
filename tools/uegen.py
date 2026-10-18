@@ -373,7 +373,8 @@ class Gen:
 
 def find_process_event(e):
     """UObject::ProcessEvent vtable index: the virtual that tests UFunction::FunctionFlags & FUNC_Native (0x400).
-    Clang emits `test byte [reg+Flags+1], 4`, MSVC `test dword [reg+Flags], 0x400`; both accepted. Each entry is
+    Clang emits `test byte [reg+Flags+1], 4`, MSVC `test dword [reg+Flags], 0x400`, some forks
+    `mov eax, [reg+Flags]; test eax, 0x4xx`; all accepted. Each entry is
     scanned only up to the next vtable function so a hit inside a neighbour is not credited to a short thunk.
     Returns (index, address) or (None, None)."""
     import struct
@@ -384,7 +385,9 @@ def find_process_event(e):
                      rb"|(?:\x41)?\xF6" + mem + re.escape(struct.pack("<I", ff + 1)) + rb"\x04"
                      # UE3: movzx eax, word [reg+Flags]; test ax, FUNC_Native|FUNC_Defined (0x402)
                      rb"|(?:\x41)?\x0F\xB7" + mem + d32 + rb".{0,12}?(?:\x66\xA9|\xA9)\x02\x04"
-                     rb"|(?:\x41)?\xF7" + mem + d32 + rb"\x02\x04\x00\x00", re.S)
+                     rb"|(?:\x41)?\xF7" + mem + d32 + rb"\x02\x04\x00\x00"
+                     # load first, then test the register (PPSA16064, Angelscript UE5 fork: test eax, 0x410)
+                     rb"|[\x40-\x4F]?\x8B" + rb"(?:[\x80-\xBF]\x24|[\x80-\xBF])" + d32 + rb".{0,12}?\xA9[\x00-\xFF]\x04\x00\x00", re.S)
     uobj = e.find("Object", CF["Class"]) or e.find("object", CF["Class"])
     vt = e.u64(e.ptr(uobj + e.O["UClass_ClassDefaultObject"])) if uobj else 0
     fns = []
