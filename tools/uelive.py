@@ -3,6 +3,9 @@
     python uelive.py ../dumps/lollipop.bin 192.168.x.y BP_CH_Main_Juliet_C bGodMode        # read
     python uelive.py ../dumps/lollipop.bin 192.168.x.y BP_CH_Main_Juliet_C bGodMode 1      # write
     python uelive.py ../dumps/lollipop.bin 192.168.x.y BP_CH_Main_Juliet_C                 # list properties
+    python uelive.py <dump.bin> <ip> BP_PlayerCharacter_C MovementAttributeSet.SprintSpeed.CurrentValue 650
+      property paths as in uecheat (object/struct hops, Name[i] array element, Prop:Class downcast); pointers are
+      followed live, so the dump must come from the running game session (object addresses change on restart)
 """
 import asyncio, math, struct, sys
 import ueobj
@@ -24,6 +27,56 @@ def resolve(e, cls, prop):
     return None, None
 
 
+def resolve_path(e, cls, path):
+    """uecheat path syntax -> (hops, field, owner); hops are ("*" pointer | "+" inline struct | "[]" array element, offset, index)."""
+    hops, segs = [], path.split(".")
+    for tok in segs[:-1]:
+        name, _, cast = tok.partition(":")
+        name, _, idx = name.rstrip("]").partition("[")
+        f, _ = resolve(e, cls, name)
+        if not f:
+            sys.exit(f"property {name} not found in {e.name(cls)} or its supers")
+        kind, off = e.ffield_class_name(f), e.prop_offset(f)
+        if idx:
+            inner = e.ptr(f + e.O["ArrayProperty_Inner"])
+            if kind != "ArrayProperty" or e.ffield_class_name(inner) != "ObjectProperty":
+                sys.exit(f"{name} is {kind}, [i] needs a TArray of object pointers")
+            hops.append(("[]", off, int(idx, 0))); cls = e.ptr(inner + e.O["ObjectProperty_Class"])
+        elif kind == "StructProperty":
+            hops.append(("+", off, 0)); cls = e.ptr(f + e.O["StructProperty_Struct"])
+        elif kind == "ObjectProperty":
+            hops.append(("*", off, 0)); cls = e.ptr(f + e.O["ObjectProperty_Class"])
+        else:
+            sys.exit(f"{name} is {kind}, expected an object pointer, struct or object array")
+        if cast:
+            cls = e.find(cast, CF["Class"]) or sys.exit(f"class {cast} not found")
+    f, owner = resolve(e, cls, segs[-1])
+    if not f:
+        sys.exit(f"property {segs[-1]} not found in {e.name(cls)} or its supers")
+    return hops, f, owner
+
+
+async def follow(dbg, pid, a, hops):
+    """Apply the hops to the live object at `a`; None if a pointer is null or the array too short."""
+    u64 = lambda raw: struct.unpack("<Q", raw)[0] if raw else 0
+    for op, off, i in hops:
+        if op == "+":
+            a += off
+            continue
+        if op == "[]":
+            n = await dbg.read_memory(pid, a + off + 8, 4)            # TArray {Data, Num, Max}
+            if not n or struct.unpack("<i", n)[0] <= i:
+                return None
+            a = u64(await dbg.read_memory(pid, a + off, 8))
+            off = 8 * i
+            if not a:
+                return None
+        a = u64(await dbg.read_memory(pid, a + off, 8))
+        if not a:
+            return None
+    return a
+
+
 async def main(dump, host, cname, prop=None, value=None):
     e = ueobj.open_engine(dump, log=lambda *a: None)
     cls = e.find(cname, CF["Class"])
@@ -36,13 +89,13 @@ async def main(dump, host, cname, prop=None, value=None):
                 print(f"  +{e.prop_offset(p):#06x} {e.ffield_class_name(p):26} {e.ffield_name(p)}   ({e.name(c)})")
             c = e.super(c)
         return
-    f, owner = resolve(e, cls, prop)
-    if not f:
-        sys.exit(f"property {prop} not found in {cname} or its supers")
+    hops, f, owner = resolve_path(e, cls, prop)
     kind, off = e.ffield_class_name(f), e.prop_offset(f)
     mask = 0xFF
     if kind == "BoolProperty":
-        mask = e.bool_info(f)[3]
+        _, boff, bmask, fmask = e.bool_info(f)
+        if fmask != 0xFF:                                        # bitfield bool: byte offset + mask within that byte
+            off, mask = off + boff, bmask
     fmt = FMT.get(kind)
     if not fmt:
         sys.exit(f"{kind} not supported for live editing")
@@ -63,19 +116,24 @@ async def main(dump, host, cname, prop=None, value=None):
     for o in inst:
         live_cls = await dbg.read_memory(pid, o + e.O["UObject_Class"], 8)
         if not live_cls or struct.unpack("<Q", live_cls)[0] != e.cls(o):
-            print(f"  {o:#x}: object gone (class changed)")
+            print(f"  {o:#x}: object gone (class changed) - dump from another session? redump")
             continue
-        raw = await dbg.read_memory(pid, o + off, struct.calcsize(fmt))
+        base = await follow(dbg, pid, o, hops)
+        if not base:
+            print(f"  {o:#x}: path not set on this instance (null pointer / short array)")
+            continue
+        addr = base + off
+        raw = await dbg.read_memory(pid, addr, struct.calcsize(fmt))
         cur = struct.unpack(fmt, raw)[0]
         shown = bool(cur & mask) if mask != 0xFF else cur
-        print(f"  {o:#x} {e.fullname(o).split(' ', 1)[1]}: {shown}")
+        print(f"  {o:#x} {e.fullname(o).split(' ', 1)[1]}: {shown}" + (f"   (at {addr:#x})" if hops else ""))
         if value is not None:
             if mask != 0xFF:
                 new = (cur | mask) if value not in ("0", "false") else (cur & ~mask & 0xFF)
             else:
                 new = float(value) if fmt[-1] in "fd" else int(value, 0)
-            await dbg.write_memory(pid, o + off, struct.pack(fmt, new))
-            back = struct.unpack(fmt, await dbg.read_memory(pid, o + off, struct.calcsize(fmt)))[0]
+            await dbg.write_memory(pid, addr, struct.pack(fmt, new))
+            back = struct.unpack(fmt, await dbg.read_memory(pid, addr, struct.calcsize(fmt)))[0]
             print(f"    -> written, readback {bool(back & mask) if mask != 0xFF else back}")
 
 
