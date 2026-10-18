@@ -3,7 +3,8 @@
     python uelive.py ../dumps/lollipop.bin 192.168.x.y BP_CH_Main_Juliet_C bGodMode        # read
     python uelive.py ../dumps/lollipop.bin 192.168.x.y BP_CH_Main_Juliet_C bGodMode 1      # write
     python uelive.py ../dumps/lollipop.bin 192.168.x.y BP_CH_Main_Juliet_C                 # list properties
-    python uelive.py <dump.bin> <ip> BP_PlayerCharacter_C MovementAttributeSet.SprintSpeed.CurrentValue 650
+    python uelive.py <dump.bin> <ip> player MovementAttributeSet.SprintSpeed.CurrentValue 650
+      class "player" = the pawn the local PlayerController owns in the dump (same start as uecheat paths)
       property paths as in uecheat (object/struct hops, Name[i] array element, Prop:Class downcast); pointers are
       followed live, so the dump must come from the running game session (object addresses change on restart)
 """
@@ -79,9 +80,16 @@ async def follow(dbg, pid, a, hops):
 
 async def main(dump, host, cname, prop=None, value=None):
     e = ueobj.open_engine(dump, log=lambda *a: None)
-    cls = e.find(cname, CF["Class"])
+    player = None
+    if cname.lower() == "player":                                # the local player's pawn, whatever its class is called
+        import uecheat
+        player = uecheat.player_pawn(e, e.prop_offset(uecheat.member(e, uecheat.cls_of(e, "Controller"), "Pawn")))
+        if not player:
+            sys.exit("no live player pawn in this dump (dump in-game, not in a menu)")
+        cname = e.name(e.cls(player))
+    cls = e.cls(player) if player else e.find(cname, CF["Class"])
     if not cls:
-        sys.exit(f"class {cname} not found")
+        sys.exit(f"class {cname} not found (use 'player' for the player pawn)")
     if not prop:
         c = cls
         while c:
@@ -107,9 +115,12 @@ async def main(dump, host, cname, prop=None, value=None):
                 return True
             c = e.super(c)
         return False
-    subs = {c for c in {e.cls(o) for i, o in e.arr} if is_a(c)}
-    inst = [o for i, o in e.arr if e.cls(o) in subs and not (e.flags(o) or 0) & RF_ClassDefaultObject]
-    print(f"{len(inst)} instance(s) in dump ({len(subs)} classes incl. subclasses)")
+    if player:
+        inst = [player]
+    else:
+        subs = {c for c in {e.cls(o) for i, o in e.arr} if is_a(c)}
+        inst = [o for i, o in e.arr if e.cls(o) in subs and not (e.flags(o) or 0) & RF_ClassDefaultObject]
+        print(f"{len(inst)} instance(s) in dump ({len(subs)} classes incl. subclasses)")
     import ps4debug
     dbg = ps4debug.PS4Debug(host)
     pid = await ueobj.game_pid(dbg)
