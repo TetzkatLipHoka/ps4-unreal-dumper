@@ -145,6 +145,15 @@ def site_instructions(e, addr):
             return out
 
 
+def tlh_version(v):
+    """dump.json version ("01.15", "01.102.999") -> TLH Version as uTrainer.SetVersion reads it: keep the first dot,
+    drop the others, then cut (never round: 1.109 must not become 1.11, a real later update) to 2 decimals."""
+    if not v:
+        return ""
+    major, _, rest = v.partition(".")
+    return f"{int(major)}.{(rest.replace('.', '') + '00')[:2]}"
+
+
 def xml_escape(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
@@ -201,7 +210,7 @@ def main(dump, out, *specs):
     if not meta.get("gworld") or not meta.get("process_event"):
         sys.exit("offsets.json lacks gworld/process_event (rerun uegen with the console reachable)")
     info = json.load(open(dump[:-4] + ".json"))
-    cusa = int(info["title_id"][4:]) if info["title_id"].startswith("CUSA") else 0
+    cusa = int(info["title_id"][4:]) if info["title_id"][4:].isdigit() else 0      # CUSA12345 / PPSA12345 -> 12345
     pe = e.d.base + meta["process_event"]
     O = e.O
     pawn_cls = e.cls(pawn) if pawn else cls_of(e, "Pawn")
@@ -279,7 +288,7 @@ def main(dump, out, *specs):
     game = xml_escape(os.path.basename(out).split("_")[0])
     xml = [f'<?xml version="1.0" encoding="utf-8" standalone="no"?>',
            f'<Trainer xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
-           f'Game="{game}" Creator="uecheat" CUSA="{cusa}" Version="" Process="eboot.bin" Legacy="1">',
+           f'Game="{game}" Creator="uecheat" CUSA="{cusa}" Version="{tlh_version(info.get("version"))}" Process="eboot.bin" Legacy="1">',
            '  <StartUP Name="UE player hook (ProcessEvent)" Description="GWorld -> GameInstance -> LocalPlayers[0] -> PlayerController -> Pawn">',
            '    <Entry>', '      <Section>0</Section>', f'      <AOB>{aob}</AOB>', '      <Type>Injection</Type>',
            f'      <Assembly>{xml_escape(asm)}</Assembly>', '    </Entry>', '  </StartUP>']

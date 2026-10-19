@@ -35,6 +35,24 @@ def read(idx, mm, addr, length):
     return None
 
 
+async def app_version(dbg, procs):
+    """Version of the foreground game ("01.15", "01.102.999"): SceCdlgApp keeps it in the rw mapping of
+    libSceCdlgUtilServer.sprx at +0xC8 (else +0x58). It belongs to the system's Commerce dialog, so it can be stale.
+    ponytail: the payload's CMD_CONSOLE_FOREGROUND_APP (0xBDDD0006, param.sfo) as fallback is not in the ps4debug lib."""
+    import re
+    try:
+        cdlg = next(p.pid for p in procs if p.name.rstrip("\0") == "SceCdlgApp")
+        m = next(m for m in await dbg.get_process_maps(cdlg) if "libSceCdlgUtilServer" in m.name and m.prot == 3)
+        for off in (0xC8, 0x58):
+            raw = await dbg.read_memory(cdlg, m.start + off, 16)
+            s = (raw or b"").split(b"\0")[0].decode("ascii", "replace")
+            if re.fullmatch(r"\d{2}\.\d{2,3}(\.\d{3})?", s):
+                return s
+    except Exception:                                             # no SceCdlgApp / mapping: version stays unknown
+        pass
+    return None
+
+
 async def dump(host, pid, out, skip_names, max_region):
     import ps4debug
     dbg = ps4debug.PS4Debug(host)
@@ -58,7 +76,8 @@ async def dump(host, pid, out, skip_names, max_region):
             print(f"skip {m.name!r} {m.start:#x} ({size >> 20} MiB > limit)")
             continue
         regions.append(m)
-    print(f"pid {pid} {info.name} {info.title_id}: {len(regions)}/{len(maps)} regions, "
+    version = await app_version(dbg, procs)
+    print(f"pid {pid} {info.name} {info.title_id} v{version or '?'}: {len(regions)}/{len(maps)} regions, "
           f"{sum(m.end - m.start for m in regions) >> 20} MiB reserved")
     sem = asyncio.Semaphore(PARALLEL)
 
@@ -79,7 +98,7 @@ async def dump(host, pid, out, skip_names, max_region):
 
     holes = []
     index = {"host": host, "pid": pid, "name": info.name, "path": info.path,
-             "title_id": info.title_id, "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+             "title_id": info.title_id, "version": version, "time": time.strftime("%Y-%m-%d %H:%M:%S"),
              "regions": [], "holes": holes}
 
     async def fetch(addr, n):
