@@ -29,7 +29,8 @@ def resolve(e, cls, prop):
 
 
 def resolve_path(e, cls, path):
-    """uecheat path syntax -> (hops, field, owner); hops are ("*" pointer | "+" inline struct | "[]" array element, offset, index)."""
+    """uecheat path syntax -> (hops, field, owner); hops are ("*" pointer | "+" inline struct | "[]" object array element
+    | "[]s" struct array element, offset, index | (index, element size))."""
     hops, segs = [], path.split(".")
     for tok in segs[:-1]:
         name, _, cast = tok.partition(":")
@@ -40,9 +41,13 @@ def resolve_path(e, cls, path):
         kind, off = e.ffield_class_name(f), e.prop_offset(f)
         if idx:
             inner = e.ptr(f + e.O["ArrayProperty_Inner"])
-            if kind != "ArrayProperty" or e.ffield_class_name(inner) != "ObjectProperty":
-                sys.exit(f"{name} is {kind}, [i] needs a TArray of object pointers")
-            hops.append(("[]", off, int(idx, 0))); cls = e.ptr(inner + e.O["ObjectProperty_Class"])
+            ik = e.ffield_class_name(inner) if kind == "ArrayProperty" else None
+            if ik == "StructProperty":                           # elements inline: Data + i * ElementSize
+                hops.append(("[]s", off, (int(idx, 0), e.prop_size(inner)))); cls = e.ptr(inner + e.O["StructProperty_Struct"])
+            elif ik == "ObjectProperty":
+                hops.append(("[]", off, int(idx, 0))); cls = e.ptr(inner + e.O["ObjectProperty_Class"])
+            else:
+                sys.exit(f"{name} is {kind}, [i] needs a TArray of object pointers or structs")
         elif kind == "StructProperty":
             hops.append(("+", off, 0)); cls = e.ptr(f + e.O["StructProperty_Struct"])
         elif kind == "ObjectProperty":
@@ -64,14 +69,18 @@ async def follow(dbg, pid, a, hops):
         if op == "+":
             a += off
             continue
-        if op == "[]":
+        if op in ("[]", "[]s"):
+            i, es = i if op == "[]s" else (i, 8)                  # struct elements inline, object elements are pointers
             n = await dbg.read_memory(pid, a + off + 8, 4)            # TArray {Data, Num, Max}
             if not n or struct.unpack("<i", n)[0] <= i:
                 return None
             a = u64(await dbg.read_memory(pid, a + off, 8))
-            off = 8 * i
             if not a:
                 return None
+            if op == "[]s":
+                a += i * es
+                continue
+            off = 8 * i
         a = u64(await dbg.read_memory(pid, a + off, 8))
         if not a:
             return None

@@ -23,7 +23,7 @@ NOTE: a pure dump comparison only knows data, not code. --xref lists every instr
 this struct offset as candidates (Blueprint variables are read by the script VM and do NOT show up in code). For ONE
 exact location you need a write watchpoint on the data address from step 1 (peek.py trace).
 """
-import argparse, json, os, re, struct, sys, time
+import argparse, bisect, json, os, re, struct, sys, time
 import numpy as np
 
 np.seterr(invalid="ignore", over="ignore")      # NaN/Inf in memory are normal
@@ -229,33 +229,96 @@ def prop_table(e, cls, cache):
     return t
 
 
+def array_props(e, cls, cache):
+    """TArray properties of a class incl. super classes and embedded structs: (offset, "path", inner property)."""
+    t = cache.get(cls)
+    if t is not None:
+        return t
+    t = []
+
+    def walk(s, base, prefix, depth):
+        c, guard = s, 0
+        while c and guard < 64:
+            for p in e.properties(c):
+                off, typ, name = e.prop_offset(p), e.ffield_class_name(p), e.ffield_name(p) or "?"
+                if off is None:
+                    continue
+                if typ == "ArrayProperty":
+                    inner = e.ptr(p + e.O["ArrayProperty_Inner"])
+                    if inner:
+                        t.append((base + off, prefix + name, inner))
+                elif typ == "StructProperty" and depth < 3:
+                    s2 = e.ptr(p + e.O["StructProperty_Struct"])
+                    if s2:
+                        walk(s2, base + off, f"{prefix}{name}.", depth + 1)
+            c, guard = e.super(c), guard + 1
+
+    walk(cls, 0, "", 0)
+    cache[cls] = t
+    return t
+
+
+def build_array_index(e):
+    """Element buffers of every TArray held by a UObject: sorted (data, bytes, owner, "path", inner property)."""
+    cache, items = {}, []
+    for _, o in e.arr:
+        c = e.cls(o)
+        if not c:
+            continue
+        for off, path, inner in array_props(e, c, cache):
+            data, n, es = e.ptr(o + off), e.i32(o + off + 8), e.prop_size(inner)
+            if data and n and es and 0 < n < 1 << 20 and 0 < es < 1 << 16:
+                items.append((data, n * es, o, path, inner))
+    items.sort(key=lambda x: x[0])
+    return items
+
+
 def resolve_hits(e, addrs, values, dtype, owner_re):
     oa, osz = build_owner_index(e)
-    cache, out, raw = {}, [], 0
+    cache, out, raw, arrs = {}, [], [], None
     idx = np.searchsorted(oa, addrs, side="right").astype(np.int64) - 1
     for k in range(len(addrs)):
         i = idx[k]
         h = int(addrs[k])
+        elem = None
         if i < 0 or h >= int(oa[i]) + int(osz[i]):
-            raw += 1
-            continue
-        owner = int(oa[i])
-        cls = e.cls(owner)
-        off = h - owner
-        full = e.fullname(owner)
-        if owner_re and not owner_re.search(full):
-            continue
-        hit = next((x for x in prop_table(e, cls, cache) if x[0] <= off < x[1]), None)
-        pname, ptype = (hit[2], hit[3]) if hit else ("?", "?")
-        poff = f"+{off - hit[0]:#x}" if hit and off != hit[0] else ""
+            # not inside a UObject: maybe an element of a TArray some UObject owns (inventory slots, stat lists ...)
+            if arrs is None:
+                arrs = build_array_index(e)
+                starts = [x[0] for x in arrs]
+            j = bisect.bisect_right(starts, h) - 1
+            if j < 0 or h >= arrs[j][0] + arrs[j][1]:
+                raw.append(k)
+                continue
+            data, _, owner, apath, inner = arrs[j]
+            es = e.prop_size(inner)
+            elem, off = (h - data) // es, (h - data) % es        # off = offset inside the element
+            st = e.ptr(inner + e.O["StructProperty_Struct"]) if e.ffield_class_name(inner) == "StructProperty" else None
+            hit = next((x for x in prop_table(e, st, cache) if x[0] <= off < x[1]), None) if st else None
+            pname = f"{apath}[{elem}]" + (f".{hit[2]}" if hit else (f"+{off:#x}" if off else ""))
+            ptype = hit[3] if hit else e.ffield_class_name(inner) or "?"
+            poff = f"+{off - hit[0]:#x}" if hit and off != hit[0] else ""
+            full = e.fullname(owner)
+            if owner_re and not owner_re.search(full):
+                continue
+        else:
+            owner = int(oa[i])
+            off = h - owner
+            full = e.fullname(owner)
+            if owner_re and not owner_re.search(full):
+                continue
+            hit = next((x for x in prop_table(e, e.cls(owner), cache) if x[0] <= off < x[1]), None)
+            pname, ptype = (hit[2], hit[3]) if hit else ("?", "?")
+            poff = f"+{off - hit[0]:#x}" if hit and off != hit[0] else ""
         score = 0
         score += 6 if PRIO_NAME.search(pname) else 0
         score += 3 if re.search(r"player|character|pawn|simon", full, re.I) else 0
         score += 2 if ptype in ("FloatProperty", "DoubleProperty", "IntProperty") else 0
         score -= 4 if "Default__" in full else 0
         score -= 2 if pname == "?" else 0
+        score -= 3 if re.search(r"WidgetTree|HUD", full, re.I) else 0      # UI shows a copy of the real value
         out.append(dict(score=score, addr=h, owner=owner, off=off, full=full, prop=pname + poff, typ=ptype,
-                        vals=values[k]))
+                        vals=values[k], elem=elem))
     out.sort(key=lambda r: (-r["score"], r["addr"]))
     return out, raw
 
@@ -392,26 +455,18 @@ def main(argv=None):
         if not len(addrs):
             continue
         rows, raw = resolve_hits(e, addrs, values, DTYPES[tname], owner_re)
-        print(f"{len(rows):,} of them are inside a UObject, {raw:,} are not (heap/engine-internal data)\n")
+        print(f"{len(rows):,} of them resolved to a UObject or one of its TArrays, {len(raw):,} not (heap/engine-internal data)\n")
         for r in rows:
             r["type"] = tname
         all_rows += rows
         print(f"{'Address':<14} {'Values (dump1 -> ...)':<28} Object  [+offset in object]  Property (type)")
         for r in rows[:args.top]:
             print(f"{r['addr']:#014x} {' -> '.join(fmt_val(v) for v in r['vals']):<28} "
-                  f"{short(r['full'])}  [{r['off']:#x}]  {r['prop']} ({r['typ']})")
+                  f"{short(r['full'])}  [{'elem+' if r['elem'] is not None else ''}{r['off']:#x}]  {r['prop']} ({r['typ']})")
         if args.raw and raw:
             print(f"\nExamples without a UObject (first {args.raw}):")
-            oa, osz = build_owner_index(e)
-            idx = np.searchsorted(oa, addrs, side="right").astype(np.int64) - 1
-            shown = 0
-            for k in range(len(addrs)):
-                i = idx[k]
-                if i < 0 or int(addrs[k]) >= int(oa[i]) + int(osz[i]):
-                    print(f"  {int(addrs[k]):#014x}  {' -> '.join(fmt_val(v) for v in values[k])}")
-                    shown += 1
-                    if shown >= args.raw:
-                        break
+            for k in raw[:args.raw]:
+                print(f"  {int(addrs[k]):#014x}  {' -> '.join(fmt_val(v) for v in values[k])}")
     if args.out and all_rows:
         with open(args.out, "w", encoding="utf-8") as f:
             for r in all_rows:
@@ -420,8 +475,12 @@ def main(argv=None):
         print(f"\n{len(all_rows)} hits written to {args.out}")
     if all_rows:
         b = all_rows[0]
-        print(f"\nBest candidate: {b['addr']:#x} = {b['full']} + {b['off']:#x}  ({b['prop']})")
-        print(f"Code for it:  python uediff.py --xref {args.dumps[0]} --disp {b['off']:#x} --write")
+        where = "offset in the TArray element" if b["elem"] is not None else "offset in the object"
+        print(f"\nBest candidate: {b['addr']:#x} = {b['full']} . {b['prop']}  ({where} {b['off']:#x})")
+        if b["off"] >= 0x80:
+            print(f'Code for it:  python uediff.py --xref "{args.dumps[0]}" --disp {b["off"]:#x} --write')
+        else:                                                    # disp8: too common for --xref
+            print(f"Code for it:  python peek.py trace {b['addr']:#x} --host <ip>   (offset {b['off']:#x} is too small for --xref)")
 
 
 if __name__ == "__main__":

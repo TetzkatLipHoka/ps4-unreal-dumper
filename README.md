@@ -63,14 +63,14 @@ structs of 1.8 GB. Old headers stay in the output folder on regeneration, delete
 | `ue3gt.py dump.bin IP <0xADDR\|Class\|Class.Property> Function [Param=Value ...]` | **UE3:** run a script function on the game thread (see below) |
 | `ue4gt.py dump.bin IP <0xADDR\|Class> Function [Param=Value\|local:Local ...] carrier=Class.ExecuteUbergraph_X [then=...]` | **UE4/5:** run a function on the game thread through a ticking Blueprint Ubergraph. Under Git Bash set `MSYS_NO_PATHCONV=1`, otherwise `/Game/` paths get rewritten |
 | `uecheat.py dump.bin out.TLH ["Name=Path=Value" \| "Name=button=Path.Function"]` | generates a trainer file for a separate in-game cheat menu PRX (not part of this repo) |
-| `uecheat.py dump.bin --find Damage [depth]` | lists ready-to-use paths from the dump's live player pawn (e.g. `HealthComponent.HealthSet.Damage.CurrentValue`, or through object arrays like `AbilitySystemComponent.SpawnedAttributes[8]:ATR_Health.Health.CurrentValue`) with type and current value |
+| `uecheat.py dump.bin --find Damage [depth]` | lists ready-to-use paths from the dump's live player pawn (e.g. `HealthComponent.HealthSet.Damage.CurrentValue`, or through arrays of objects or structs like `AbilitySystemComponent.SpawnedAttributes[8]:ATR_Health.Health.CurrentValue`, `PlayerInventoryComponent.Inventory[15].Amount`) with type and current value |
 | `ps4prx.py IP load\|unload\|list ...` | load, unload or list PRX modules in the running game (ps4debug-ng + GoldHEN FTP) |
 
 Contributed extras (by Stoned):
 
 | Tool | Purpose |
 |---|---|
-| `uediff.py A.bin B.bin [C.bin] --type float --rel dec[,inc] [--v0 100 --v1 75] [--owner Regex]` | compare two or more dumps like a "next scan" and resolve every hit to its UObject and property. Needs `numpy` |
+| `uediff.py A.bin B.bin [C.bin] --type float --rel dec[,inc] [--v0 100 --v1 75] [--owner Regex]` | compare two or more dumps like a "next scan" and resolve every hit to its UObject and property, also inside TArray element buffers (`Owner.Inventory[15].Amount`). Needs `numpy` |
 | `uediff.py --xref dump.bin --disp 0x2A8 [--write] [--mnem mov,vmovss]` | list the instructions in the game image that access a struct offset. Needs `capstone` |
 | `peek.py read\|write\|freeze\|watch\|trace 0xADDR [value] --host IP [--type float]` (or set `PS4_HOST`) | raw live memory access; `trace` sets a hardware write watchpoint and reports the writing instruction (experimental, needs `capstone`) |
 
