@@ -92,6 +92,7 @@ async def dump(host, pid, out, skip_names, max_region):
 
     t0 = time.time()
     done = 0
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)       # "-o ../dumps/NewGame/dump": folder may not exist yet
     with open(out + ".bin", "wb") as f:
         for i in range(0, len(chunks), PARALLEL * 2):
             batch = chunks[i:i + PARALLEL * 2]
