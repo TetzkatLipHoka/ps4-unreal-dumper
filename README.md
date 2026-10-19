@@ -119,6 +119,10 @@ python ue3gt.py  ../dumps/CUSA02231/dump.bin 192.168.x.y PlayerController.CheatM
 - [examples/AC_India.md](examples/AC_India.md): UE3, from dump to God mode and unlocked trophies without a PRX.
 - [examples/DaysGone.md](examples/DaysGone.md): UE4, CheatManager via `uecall`, Bend's own debug menu opened on
   the game thread via `ue4gt`.
+- Palworld (PS5) by Trexxxo: [crit-catch rate](examples/Palworld_CritBonus.md) and
+  [high capture rate](examples/Palworld_HighCapture.md) without a PRX, and
+  [Craft Anything](examples/Palworld_CraftAnything.md): from SDK `native` addresses to the worker function,
+  out-parameter caves, AOBs and a Reaper Studio patch.
 
 ## Samples
 

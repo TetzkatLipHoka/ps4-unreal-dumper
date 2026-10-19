@@ -84,7 +84,7 @@ This produces (inside `../dumps/<TitleID>/`):
 | `SDK/offsets.json` | The same values, machine readable | Used by the live tools |
 | `SDK/GObjects.txt` | Every object with address and full name | Finding classes, functions, widgets |
 | `SDK/ReClass.rcnet` | ReClass.NET project (UWorld hangs off GWorld) | Interactive structure browsing |
-| `rpc_stub.txt` | Address of the RPC stub | `uecall` / `ue4gt` |
+| `rpc_stub.txt` | Address of the RPC stub (written by `uecall` on its first call, not by `ps4ue`) | `uecall` / `ue4gt` |
 
 Need the SDK again later (or from a shared dump)? No console needed:
 
@@ -123,7 +123,7 @@ The main executable starts at `0x400000`, and because the first region is stored
 
 **Heap vs. code:**
 - Blueprint-generated classes, CDOs, UFunction objects: fixed enough to navigate.
-- Live widget instances, player controllers, models: addresses change every boot. `uelive.py` re-reads them live from GObjects â€” that is why it always asks for the dump: to know the class/offset layout, not the old addresses.
+- Live widget instances, player controllers, models: addresses change every boot. `uelive.py` takes the instance addresses **from the dump** and only checks live that each object still has the same class (otherwise it reports "object gone"). So the dump must come from the **current game session**: after a restart, redump before using `uelive.py`. Pointers *behind* the instance (property paths like `A.B.C`) are followed live.
 
 ---
 
@@ -312,14 +312,14 @@ This is exactly what the `CraftV2UtilArrCave` and `CraftV2UtilMapCave` do (see Â
 The dump tells you *what the code looks like*; UELive tells you *what the game is doing right now*.
 
 ```bat
-:: list all live instances of a class (including subclasses)
+:: list the properties of a class (offline, from the dump: offset, type, name)
 python uelive.py ..\dumps\PPSA23126\dump.bin 192.168.50.2 PalItemUtility
 
-:: read a property on all instances
-python uelive.py ..\dumps\PPSA23126\dump.bin 192.168.50.2 PlayerController FOV
+:: read a property on all instances of a class (including subclasses)
+python uelive.py ..\dumps\PPSA23126\dump.bin 192.168.50.2 PlayerController bShowMouseCursor
 
-:: write a property (test / experiment)
-python uelive.py ..\dumps\PPSA23126\dump.bin 192.168.50.2 PlayerController FOV 120
+:: write a property (test / experiment); "player" = your own pawn, paths as printed by uecheat --find
+python uelive.py ..\dumps\PPSA23126\dump.bin 192.168.50.2 player CharacterMovement.MaxWalkSpeed 1200
 
 :: call a UFunction through ProcessEvent and read back out params / return
 python uecall.py ..\dumps\PPSA23126\dump.bin 192.168.50.2 GameplayStatics SetGlobalTimeDilation WorldContextObject=0x... TimeDilation=0.3
@@ -831,8 +831,8 @@ python ps4dump.py --host 192.168.50.2 -o ..\dumps\PPSA23126\dump
 :: SDK only
 python uegen.py ..\dumps\PPSA23126\dump.bin ..\dumps\PPSA23126\SDK
 
-:: live: list / read / write properties
-python uelive.py ..\dumps\PPSA23126\dump.bin 192.168.50.2 <Class> [Property [Value]]
+:: live: list / read / write properties (dump from the current game session)
+python uelive.py ..\dumps\PPSA23126\dump.bin 192.168.50.2 <Class|player> [Property.Path [Value]]
 
 :: live: call a UFunction, read out params and return
 python uecall.py ..\dumps\PPSA23126\dump.bin 192.168.50.2 <Class> <Function> [obj=0xADDR] [Param=Value ...]
