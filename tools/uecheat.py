@@ -240,7 +240,7 @@ def main(dump, out, *specs):
                 sys.exit(f"{name}: function {toks[-1]} not found")
             impl = native_impl(e, fn)
             syms.append(f"RegisterSymbol( Fn{k}, ModuleBase+{impl - e.d.base:#x} )")
-            code += ["mov rdi, rcx", "sub rsp, 8", f"mov rax, Fn{k}", "call rax", "add rsp, 8", f"b{k}_pop:"]
+            code += ["mov rdi, rcx", "sub rsp, 8", f"movabs rax, Fn{k}", "call rax", "add rsp, 8", f"b{k}_pop:"]
             code += [f"pop {r}" for r in reversed(CALLER_SAVED)] + [f"b{k}_end:"]
             button_blocks.append("\n".join(code))
             cheats.append((name, entries))
