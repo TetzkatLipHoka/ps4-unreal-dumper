@@ -179,26 +179,29 @@ class ObjectArray:
         self.max_chunks, self.num_chunks = d.i32(addr + mc), d.i32(addr + nc)
         self.per_chunk = self.max // self.max_chunks
         self.chunk0 = d.u64(self.objects)
-        self.item_size = self.measure_item_size()
+        self.item_size, self.obj_off = self.measure_item()
 
-    def measure_item_size(self):
-        """FUObjectItem size varies (packing, extra fields): pick the stride where item k -> UObject with Index k."""
+    def measure_item(self):
+        """FUObjectItem layout varies (packing, extra fields, field order): pick the stride and the offset of the
+        UObject* inside the item where item k -> UObject with Index k. Usually the pointer is first; Valor Mortis
+        (PPSA32793, UE5) has 0x18-byte items with a flags qword first and the pointer at +8."""
         chunk = self.chunk0
-        best = (0, 24)
+        best = (0, 0, 24)
         for stride in (16, 20, 24, 32, 40):
-            hits = 0
-            for k in range(1, 40):
-                o = self.d.u64(chunk + k * stride)
-                if self.d.is_ptr(o) and self.d.i32(o + 0xC) == k:
-                    hits += 1
-            best = max(best, (hits, stride))
-        return best[1]
+            for off in range(0, stride - 7, 8):
+                hits = 0
+                for k in range(1, 40):
+                    o = self.d.u64(chunk + k * stride + off)
+                    if self.d.is_ptr(o) and self.d.i32(o + 0xC) == k:
+                        hits += 1
+                best = max(best, (hits, -off, stride))
+        return best[2], -best[1]
 
     def get(self, i):
         if not 0 <= i < self.num:
             return None
         chunk = self.d.u64(self.objects + 8 * (i // self.per_chunk))
-        return None if not chunk else self.d.u64(chunk + (i % self.per_chunk) * self.item_size)
+        return None if not chunk else self.d.u64(chunk + (i % self.per_chunk) * self.item_size + self.obj_off)
 
     def __iter__(self):
         # The dump is not atomic (minutes): objects freed meanwhile still sit in the array but their memory is
@@ -247,10 +250,10 @@ class FlatObjectArray(ObjectArray):
         self.max_chunks = self.num_chunks = 1
         self.per_chunk = self.max
         self.chunk0 = self.objects
-        self.item_size = self.measure_item_size()
+        self.item_size, self.obj_off = self.measure_item()
 
     def get(self, i):
-        return self.d.u64(self.objects + i * self.item_size) if 0 <= i < self.num else None
+        return self.d.u64(self.objects + i * self.item_size + self.obj_off) if 0 <= i < self.num else None
 
     @staticmethod
     def find(d, lo, hi):
@@ -290,7 +293,7 @@ def main(path):
     print(f"GObjects at {arr.addr:#x} = base+{arr.addr - d.base:#x}, layout {arr.layout}, "
           f"num {arr.num}, max {arr.max}, chunks {arr.num_chunks}/{arr.max_chunks}, per chunk {arr.per_chunk:#x}")
     # Standard UObject: vft 0, flags 8, index 0xC, class 0x10, name 0x18, outer 0x20
-    print(f"  FUObjectItem size {arr.item_size}")
+    print(f"  FUObjectItem size {arr.item_size}, UObject* at +{arr.obj_off:#x}")
     for i in range(8):
         o = arr.get(i)
         if not o:

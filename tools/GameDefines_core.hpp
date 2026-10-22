@@ -9,6 +9,9 @@
 #define UE_MODULE_BASE 0x400000ULL          // eboot.bin text base on PS4; override before including if needed
 #endif
 #define UE_ADDR(off) ((uintptr_t)UE_MODULE_BASE + (uintptr_t)(off))
+#ifndef FUObjectItem_Object
+#define FUObjectItem_Object 0                // UObject* offset inside FUObjectItem (0x8 on Valor Mortis)
+#endif
 
 template<typename T>
 struct TArray
@@ -145,7 +148,7 @@ namespace UE
 		return arr->valid(i) ? arr->Data[i] : nullptr;
 #elif defined(GObjects_Flat)
 		uint8_t* objects = *(uint8_t**)UE_ADDR(GObjects_Offset);
-		return (objects && i >= 0 && i < ObjectCount()) ? *(UObject**)(objects + i * FUObjectItem_Size) : nullptr;
+		return (objects && i >= 0 && i < ObjectCount()) ? *(UObject**)(objects + i * FUObjectItem_Size + FUObjectItem_Object) : nullptr;
 #else
 		uintptr_t a = UE_ADDR(GObjects_Offset);
 		uint8_t** objects = *(uint8_t***)(a + GObjects_Layout_Objects);
@@ -153,7 +156,7 @@ namespace UE
 		if (!objects || i < 0 || i >= ObjectCount() || maxChunks <= 0) return nullptr;
 		int32_t perChunk = max / maxChunks;
 		uint8_t* chunk = objects[i / perChunk];
-		return chunk ? *(UObject**)(chunk + (i % perChunk) * FUObjectItem_Size) : nullptr;
+		return chunk ? *(UObject**)(chunk + (i % perChunk) * FUObjectItem_Size + FUObjectItem_Object) : nullptr;
 #endif
 	}
 

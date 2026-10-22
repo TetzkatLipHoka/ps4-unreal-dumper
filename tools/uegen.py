@@ -500,6 +500,7 @@ if __name__ == "__main__":
                 break
     meta = dict(title=title, base=e.d.base, gnames=gnames - e.d.base, gobjects=e.arr.addr - e.d.base,
                 gworld=(gw - e.d.base) if gw else None, gobjects_layout=e.arr.layout, fuobjectitem_size=e.arr.item_size,
+                fuobjectitem_object_offset=getattr(e.arr, "obj_off", 0),
                 name_block_bits=e.pool.block_bits, use_fproperty=e.use_fproperty, case_preserving=e.case_preserving,
                 outline_number=e.outline_number, process_event_index=pe_idx,
                 process_event=(pe_addr - e.d.base) if pe_idx is not None else None, offsets=e.O)
@@ -513,7 +514,8 @@ if __name__ == "__main__":
                     + ", ".join(f"0x{a - e.d.base:X}" for a in gw_all) + "\n")
         if pe_idx is not None:
             f.write(f"#define ProcessEvent_Index {pe_idx}   // UObject vtable slot\n#define ProcessEvent_Offset 0x{meta['process_event']:X}\n")
-        f.write(f"#define FUObjectItem_Size {e.arr.item_size}\n#define FNamePool_BlockBits {e.pool.block_bits}\n\n")
+        f.write(f"#define FUObjectItem_Size {e.arr.item_size}\n#define FUObjectItem_Object {getattr(e.arr, 'obj_off', 0):#x}   // UObject* inside the item\n"
+                f"#define FNamePool_BlockBits {e.pool.block_bits}\n\n")
         for k, v in e.O.items():
             if v is not None:
                 f.write(f"#define OFF_{k:<40} 0x{v:X}\n")

@@ -617,7 +617,7 @@ def open_engine(path, log=print):
             sys.exit("GObjects not found")
     log(f"names: {type(pool).__name__}")
     log(f"GNames {pool.addr:#x} (base+{pool.addr - d.base:#x})  GObjects {arr.addr:#x} (base+{arr.addr - d.base:#x})  "
-        f"objects {arr.num}  item size {arr.item_size}")
+        f"objects {arr.num}  item size {arr.item_size}" + (f" (UObject* at +{arr.obj_off:#x})" if getattr(arr, "obj_off", 0) else ""))
     e = Engine(d, pool, arr, log)
     e.init()
     json.dump(dict(kind="ue4", pool_kind=type(pool).__name__, pool=pool.addr, stride=getattr(pool, "stride", None),
@@ -632,7 +632,7 @@ if __name__ == "__main__":
     out = path[:-4] + "_out"
     os.makedirs(out, exist_ok=True)
     meta = dict(base=e.d.base, gnames=e.pool.addr, gobjects=e.arr.addr, gobjects_layout=e.arr.layout,
-                fuobjectitem_size=e.arr.item_size, name_block_bits=e.pool.block_bits, use_fproperty=e.use_fproperty,
+                fuobjectitem_size=e.arr.item_size, fuobjectitem_object_offset=getattr(e.arr, "obj_off", 0), name_block_bits=e.pool.block_bits, use_fproperty=e.use_fproperty,
                 case_preserving=e.case_preserving, outline_number=e.outline_number, offsets=e.O)
     json.dump(meta, open(os.path.join(out, "offsets.json"), "w"), indent=1)
     with open(os.path.join(out, "GObjects.txt"), "w", encoding="utf-8") as f:

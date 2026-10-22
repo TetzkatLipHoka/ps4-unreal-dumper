@@ -8,7 +8,8 @@ Tested: Jedi Fallen Order (UE 4.21), Hogwarts Legacy (UE 4.27 custom), The Quarr
 Lollipop Chainsaw RePop (UE 5.2), Days Gone (UE 4.11), SAO Last Recollection (UE4), FF7 Remake (UE 4.18),
 Fatal Bullet (UE 4.15), WWE 2K Battlegrounds (UE4), Dishonored Definitive Edition (UE3), Thief (UE3),
 Borderlands 2 / Pre-Sequel (UE3 Gearbox), Mass Effect Legendary Edition 1-3 (UE3 with BioWare name pool,
-detected automatically), Tiny Tina's Wonderlands (UE 4.20), High on Life (UE5), Duskfade (PS5, UE 5.1+), PalWorld (PS5, UE5).
+detected automatically), Tiny Tina's Wonderlands (UE 4.20), High on Life (UE5), Duskfade (PS5, UE 5.1+), PalWorld (PS5, UE5),
+Valor Mortis (PS5, UE5, FUObjectItem with the object pointer at +8).
 
 ## Requirements
 
