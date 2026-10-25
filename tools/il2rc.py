@@ -21,7 +21,7 @@ PRIM = dict(bool=("BoolNode", 1), sbyte=("Int8Node", 1), byte=("UInt8Node", 1), 
             float=("FloatNode", 4), double=("DoubleNode", 8), char=("UInt16Node", 2), IntPtr=("Hex64Node", 8), UIntPtr=("Hex64Node", 8))
 MODS = {"public", "private", "internal", "protected", "static", "readonly", "const", "volatile", "abstract", "sealed", "new", "unsafe"}
 HEADER = 0x10                                   # Il2CppObject: klass*, monitor*
-TYPE_RE = re.compile(r"^(?P<mods>(?:\w+\s+)*?)(?P<kind>class|struct|enum|interface)\s+(?P<name>\S+)(?:\s*:\s*(?P<bases>.*?))?\s*// TypeDefIndex: (?P<idx>\d+)")
+TYPE_RE = re.compile(r"^(?P<mods>(?:\w+\s+)*?)(?P<kind>class|struct|enum|interface)\s+(?P<name>[^\s<]+(?:<[^>]*>)?)(?:\s*:\s*(?P<bases>.*?))?\s*// TypeDefIndex: (?P<idx>\d+)")
 FIELD_RE = re.compile(r"^\t(?P<decl>.+?)(?: = (?P<val>.*?))?; // 0x(?P<off>[0-9A-Fa-f]+)$")
 CONST_RE = re.compile(r"^\t(?P<decl>.+?) = (?P<val>.*?);$")
 IMAGE_RE = re.compile(r"^// Image \d+: (?P<name>\S+) - (?P<start>\d+)")
