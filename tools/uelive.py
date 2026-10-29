@@ -8,6 +8,7 @@
       property paths as in uecheat (object/struct hops, Name[i] array element, Prop:Class downcast); pointers are
       followed live, so the dump must come from the running game session (object addresses change on restart)
     ... player World.<path> [value]      # uecheat World-rooted path, starts at the live GWorld (works from any session)
+    ... player GameData:RmoPlayerData.@0xd8:i [v]  # raw offset of an unreflected C++ field, as uecheat --addr prints it (i/f/d/b)
     ... player <path> [value] --live    # other session: the pawn is found on the console (GWorld chain), dump only
                                          # supplies the class layouts (needs the same game binary/base)
 """
@@ -106,10 +107,18 @@ def resolve_path(e, cls, path):
             sys.exit(f"{name} is {kind}, expected an object pointer, struct or object array")
         if cast:
             cls = e.find(cast, CF["Class"]) or sys.exit(f"class {cast} not found")
+    if segs[-1].startswith("@"):                                 # raw offset of an unreflected C++ field (uecheat --addr)
+        import uecheat
+        return hops, uecheat.raw_leaf(segs[-1]), cls
     f, owner = resolve(e, cls, segs[-1])
     if not f:
         sys.exit(f"property {segs[-1]} not found in {e.name(cls)} or its supers")
     return hops, f, owner
+
+
+def leaf(e, f):
+    """(kind, offset) of the last path segment: a property, or (offset, kind) from a raw @0xNN:t segment."""
+    return (f[1], f[0]) if isinstance(f, tuple) else (e.ffield_class_name(f), e.prop_offset(f))
 
 
 async def follow(dbg, pid, a, hops):
@@ -160,7 +169,7 @@ async def main(dump, host, cname, prop=None, value=None):
             c = e.super(c)
         return
     hops, f, owner = resolve_path(e, cls, prop)
-    kind, off = e.ffield_class_name(f), e.prop_offset(f)
+    kind, off = leaf(e, f)
     mask = 0xFF
     if kind == "BoolProperty":
         _, boff, bmask, fmask = e.bool_info(f)
@@ -241,7 +250,7 @@ async def read_many(dump, host, paths):
                 hops, f, owner = resolve_path(e, e.find("World", CF["Class"]), p[6:])
             else:
                 hops, f, owner = resolve_path(e, cls, p)
-            kind, off, mask = e.ffield_class_name(f), e.prop_offset(f), 0xFF
+            (kind, off), mask = leaf(e, f), 0xFF
             if kind == "BoolProperty":
                 _, boff, bmask, fmask = e.bool_info(f)
                 if fmask != 0xFF:

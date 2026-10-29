@@ -9,6 +9,7 @@
       "Hp=World.OwningGameInstance:BP_MossGameInstance_C.SharedHero:BP_HeroCharacter_C.CurrentHealth=3"
                           (World.-rooted: from GWorld, for characters the controlled pawn does not reach; --find/--addr
                            search from the pawn and from World)
+      "Hp=GameData:RmoPlayerData.@0xd8:i=999"   (@offset:type = unreflected C++ field, as --addr prints it; i/f/d/b)
     python uecheat.py <dump.bin> --find Damage [depth]   # list ready-to-use paths whose name contains the word (default depth 4)
       walks the dump's live player pawn (real component classes, downcasts added), prints path, type and dump value
     python uecheat.py <dump.bin> --addr 0x15a4a0d274 [0x...] [depth]   # path(s) to an address found with a scanner
@@ -58,6 +59,15 @@ def cls_of(e, name):
     return e.find(name, CF["Class"]) or sys.exit(f"class {name} not found")
 
 
+RAW = dict(i="IntProperty", f="FloatProperty", d="DoubleProperty", b="ByteProperty")
+
+
+def raw_leaf(seg):
+    """"@0xd8:i" (from --addr, an unreflected C++ field) -> (offset, kind); type i/f/d/b, default i."""
+    off, _, t = seg[1:].partition(":")
+    return int(off, 0), RAW.get(t or "i") or sys.exit(f"{seg}: type must be one of {'/'.join(RAW)}")
+
+
 def player_pawn(e, pawn_off):
     """The pawn a live PlayerController owns in the dump (its class = most-derived start for property paths)."""
     pc = e.find("PlayerController", CF["Class"])
@@ -78,19 +88,23 @@ def find_paths(e, roots, word, depth=4, addrs=None):
     it sits in, contains `word` (object names earlier in the path don't count: that would list whole components).
     With `addrs` (addresses from a scanner, same dump/session) members whose bytes cover one of them match instead.
     Object hops use the instance's real class (":Class" downcast when it differs from the declared one)."""
-    word, hits = word.lower(), []
+    word, hits, raw, hit_addrs = word.lower(), [], {}, set()
     seen, todo = {o for o, _ in roots}, [(o, e.cls(o), pre, "") for o, pre in roots]
     for _ in range(depth + 1):
         nxt = []
         for addr, st, path, local in todo:                       # local = struct names since the last object hop
+            for t in addrs or ():                                # inside this object/struct but maybe in an unreflected
+                if addr <= t < addr + (e.struct_size(st) or 0) and t not in raw:      # C++ field: first (shortest) wins
+                    raw[t] = (f"{path}@{t - addr:#x}", e.val(t, "<i"), e.val(t, "<f"))
             c = st
             while c:
                 for p in e.properties(c):
                     objs, name, kind = [], e.ffield_name(p) or "?", e.ffield_class_name(p)
                     a, full = addr + e.prop_offset(p), path + name
                     if kind in FMT or kind == "BoolProperty":
-                        if (any(a <= t < a + (e.prop_size(p) or 1) for t in addrs) if addrs is not None
-                                else word in (local + name).lower()):
+                        cov = [t for t in addrs or () if a <= t < a + (e.prop_size(p) or 1)]
+                        hit_addrs.update(cov)
+                        if cov if addrs is not None else word in (local + name).lower():
                             if kind == "BoolProperty":
                                 _, boff, mask, _ = e.bool_info(p)
                                 v = int(bool((e.val(a + boff, "<B") or 0) & mask))
@@ -122,6 +136,10 @@ def find_paths(e, roots, word, depth=4, addrs=None):
                                         f"{e.name(rc)}." if seg.endswith("]") else ""))
                 c = e.super(c)
         todo = nxt
+    for t, (path, i, f) in raw.items():                          # no named member covers t: raw offset, type guessed
+        if not any(a == t for a in hit_addrs):
+            fl = f is not None and 1e-3 < abs(f) < 1e7           # ponytail: int/float guess from the dump value only
+            hits.append((path + (":f" if fl else ":i"), "Raw:" + ("FloatProperty" if fl else "IntProperty"), f if fl else i))
     return hits
 
 
@@ -315,6 +333,10 @@ def main(dump, out, *specs):
             if not rows:
                 print(f"no member within {depth} hops of the pawn or World covers {', '.join(hex(x) for x in addrs)} "
                       "(other session's dump? value outside the pawn's objects? try uediff.py)")
+                for t in addrs:
+                    o = next((o for _, o in e.arr if e.cls(o) and o <= t < o + (e.struct_size(e.cls(o)) or 8)), None)
+                    print(f"  {t:#x}: " + ("not inside the dump" if e.val(t, "<B") is None else
+                                          f"inside {e.fullname(o)} +{t - o:#x}" if o else "not inside any UObject (heap data)"))
         else:
             rows = find_paths(e, roots, specs[0], int(specs[1]) if len(specs) > 1 else 4)
         for path, kind, v in rows:
@@ -367,7 +389,10 @@ def main(dump, out, *specs):
             cls, reg, pend = path_code(e, world_cls, segs[1:-1], "rcx", f"c{k}_end", code)
         else:
             cls, reg, pend = path_code(e, pawn_cls, segs[:-1], "rax", f"c{k}_end", code)
-        p = member(e, cls, segs[-1]); kind = e.ffield_class_name(p); off = e.prop_offset(p)
+        if segs[-1].startswith("@"):                              # raw offset of an unreflected C++ field: @0xd8:i
+            off, kind = raw_leaf(segs[-1])
+        else:
+            p = member(e, cls, segs[-1]); kind = e.ffield_class_name(p); off = e.prop_offset(p)
         if kind == "BoolProperty":
             _, boff, mask, fmask = e.bool_info(p)
             close(e, code, pend, off + boff + 1, f"c{k}_end")
