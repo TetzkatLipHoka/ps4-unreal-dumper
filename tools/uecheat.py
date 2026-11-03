@@ -352,11 +352,18 @@ def main(dump, out, *specs):
     world_cls = cls_of(e, "World")
     print(f"player pawn class in dump: {e.name(pawn_cls)}")
 
-    cheats, pawn_blocks, world_blocks, mems, syms = [], [], [], [], []
+    cheats, pawn_blocks, world_blocks, mems, syms, item_specs = [], [], [], [], [], []
     for k, spec in enumerate(specs or DEFAULT, 1):
         name, path, value = spec.split("=", 2)
         mems.append(f"GetMem( Flag{k}, 1 )")
         entries = [f"      <Symbol>Flag{k}</Symbol>\n      <Type>Value</Type>\n      <ValueType>Boolean</ValueType>\n      <Value>0</Value>"]
+        if path.startswith("item:"):                              # inventory rule (ueitems): "Name=item:ITEM_ID=amount" / "item:$money" / "item:$expand" (inventory to max)
+            mems.append(f"GetMem( Val{k}, 4 )")
+            entries.append(f"      <Symbol>Val{k}</Symbol>\n      <Type>Value</Type>\n      <ValueType>Integer</ValueType>\n      <Value>{value}</Value>")
+            item_specs.append((k, path[5:], value))
+            cheats.append((name, entries))
+            print(f"{name}: inventory {path[5:]} = {value}")
+            continue
         if path == "button":
             toks = value.split(".")
             root, cls, reg = toks[0], None, "rcx"
@@ -416,6 +423,29 @@ def main(dump, out, *specs):
         cheats.append((name, entries))
         print(f"{name}: {'' if segs[0] == 'World' else 'pawn.'}{path} ({kind} +{off:#x}) = {value}")
 
+    if item_specs:                                              # all inventory rules share one block (own chain walk + add_item routine)
+        import ueitems, ueitems_tlh
+        cache = ueitems.load_cache(dump)
+        if cache.get("mode") == "give":                          # no built-in inventory layout: call the game's own give function
+            gi = cache["give"]["item"]
+            pe_specs = [s for s in item_specs if gi.get("via") == "pe" or s[1].lower() == "$expand"]     # expansion: ProcessEvent only
+            nat_specs = [s for s in item_specs if s not in pe_specs]
+            if pe_specs:
+                gcode, gsyms = ueitems_tlh.pe_block(e, dump, cache, pe_specs, meta)
+                print(f"inventory rules: {len(pe_specs)} via ProcessEvent ({gi['owner']}::{gi['name']})")
+                world_blocks.append("\n".join(gcode))
+                syms += gsyms
+            if nat_specs:
+                gcode, gsyms = ueitems_tlh.give_block(cache, nat_specs)
+                print(f"inventory rules: {len(nat_specs)} via {gi['owner']}::{gi['name']} (impl base+{gi['impl_rva']:#x})")
+                world_blocks.append("\n".join(gcode))
+                syms += gsyms
+        else:
+            ch = ueitems_tlh.resolve_chain(e, dump, cache)
+            entries, money = ueitems_tlh.rule_entries(cache, item_specs)
+            world_blocks.append("\n".join(ueitems_tlh.world_block(e, ch, entries, money)))
+            if ch["static"]:
+                syms.append(ueitems_tlh.static_symbol(cache, ch))
     syms = [f"RegisterSymbol( GWorld, ModuleBase+{meta['gworld']:#x} )"] + ([f"RegisterSymbol( GObjects, ModuleBase+{meta['gobjects']:#x} )"] if "[GObjects]" in str(world_blocks + pawn_blocks) else []) + syms
     asm = "\n".join(mems + syms + ["", "pushfq", "push rax", "push rcx", "push rdx", ""]
                     + world_blocks

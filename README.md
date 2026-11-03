@@ -13,7 +13,7 @@ Valor Mortis (PS5, UE5, FUObjectItem with the object pointer at +8).
 
 ## Requirements
 
-- Python 3.12, `pip install ps4debug` (PyPI). Optional `capstone` for code analysis, `numpy` for `uediff`.
+- Python 3.12, `pip install ps4debug` (PyPI). Optional `capstone` for code analysis (needed by `ueitems`), `numpy` for `uediff` and the `ueitems` scan.
 - PS4 with GoldHEN and ps4debug (or ps4debug-ng) running, reachable over the network.
 - The game must have a level loaded. **The pause menu is fine**: a dump taken in the pause menu yields the
   same offsets, classes and objects as one taken in the running scene. Only the main menu lacks level
@@ -69,6 +69,10 @@ structs of 1.8 GB. Old headers stay in the output folder on regeneration, delete
 | `uecheat.py dump.bin --fields Path` | lists the fields behind a path (pawn- or `World.`-rooted) with type and current value |
 | `uelive.py dump.bin IP player <Path\|World.Path> [Value] [--live]` | read or write a uecheat path; `World.` paths start at the live GWorld and work from any session, `--live` finds the pawn on the console; `player --read-many P1 P2 ...` reads several paths at once |
 | `ps4prx.py IP load\|unload\|list ...` | load, unload or list PRX modules in the running game (ps4debug-ng + GoldHEN FTP) |
+| `ueitems.py dump.bin scan` | item catalog (DataTables, item classes/data assets, gameplay tags, with category and hold/stack limits) and the game's own give-item function (native or through ProcessEvent), ranked; also a parameterless inventory-expansion function if the game has one |
+| `ueitems.py dump.bin give IP ITEM=3 [$money=999\|$expand] [--force] [--rpc]` | gives items right now; ProcessEvent calls run on the game thread through a one-shot hook on ProcessEvent (removed after the call), `--rpc` uses the debugger's thread instead; amounts are cut to the item's limit unless `--force`; a `false` return is reported as REFUSED |
+| `ueitems.py dump.bin mark ok\|fail\|clear [Owner::Name]` | remembers whether the last give arrived (`items_tested.json` next to the dump); ok = preferred, fail = last resort |
+| `uecheat.py dump.bin out.TLH "Name=item:ITEM_ID=5"` | inventory rule in a cheat: calls the same give function from the cheat's ProcessEvent hook (`item:$money`, `item:$expand`) |
 
 Contributed extras (by Stoned):
 
@@ -98,6 +102,11 @@ UE3 only). Return values are lost.
 
 Both tools verify live that the target object still exists and the function is in its class chain before
 patching. Calling an unknown function name would crash the script VM.
+
+`ueitems give` goes a third way for ProcessEvent calls: it hooks ProcessEvent's entry for one call, so the next
+call the game makes (on its game thread) runs ours first. Measured on RuneScape Dragonwilds: `TryGiveItemToPlayer` from
+the RPC thread loads the item icon synchronously and terminates the game (FlushAsyncLoading off the game thread); via
+the hook it works.
 
 ## UE3 notes
 
