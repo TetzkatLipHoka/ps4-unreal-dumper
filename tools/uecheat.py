@@ -436,7 +436,7 @@ def main(dump, out, *specs):
                 world_blocks.append("\n".join(gcode))
                 syms += gsyms
             if nat_specs:
-                gcode, gsyms = ueitems_tlh.give_block(cache, nat_specs)
+                gcode, gsyms = ueitems_tlh.give_block(cache, nat_specs, e, meta)
                 print(f"inventory rules: {len(nat_specs)} via {gi['owner']}::{gi['name']} (impl base+{gi['impl_rva']:#x})")
                 world_blocks.append("\n".join(gcode))
                 syms += gsyms
@@ -446,7 +446,7 @@ def main(dump, out, *specs):
             world_blocks.append("\n".join(ueitems_tlh.world_block(e, ch, entries, money)))
             if ch["static"]:
                 syms.append(ueitems_tlh.static_symbol(cache, ch))
-    syms = [f"RegisterSymbol( GWorld, ModuleBase+{meta['gworld']:#x} )"] + ([f"RegisterSymbol( GObjects, ModuleBase+{meta['gobjects']:#x} )"] if "[GObjects]" in str(world_blocks + pawn_blocks) else []) + syms
+    syms = [f"RegisterSymbol( GWorld, ModuleBase+{meta['gworld']:#x} )"] + ([f"RegisterSymbol( GObjects, ModuleBase+{meta['gobjects']:#x} )"] if "[GObjects]" in str(world_blocks + pawn_blocks) else []) + list(dict.fromkeys(syms))
     asm = "\n".join(mems + syms + ["", "pushfq", "push rax", "push rcx", "push rdx", ""]
                     + world_blocks
                     + ["mov rax, [GWorld]", "test rax, rax", "jz done",

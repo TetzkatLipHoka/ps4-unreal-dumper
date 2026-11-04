@@ -108,6 +108,11 @@ call the game makes (on its game thread) runs ours first. Measured on RuneScape 
 the RPC thread loads the item icon synchronously and terminates the game (FlushAsyncLoading off the game thread); via
 the hook it works.
 
+FName indices are not stable between sessions of the same game (measured on two dumps of one binary: 64 of 1315
+gameplay tags and 9902 of 10575 function names kept theirs). Item cheats therefore look the name up in the FNamePool when
+they are switched on, and `ueitems give` does the same when a name moved, so an exported `.TLH` keeps working after a
+restart. With older name tables or a name pool in the heap the index stays fixed to the dump's session; the export warns.
+
 ## UE3 notes
 
 - Functions with an `iNative` number (opcode natives such as Abs, Sqrt, SetTimer) return immediately from

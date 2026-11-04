@@ -21,7 +21,8 @@ CPF_Parm, CPF_Return = 0x80, 0x400
 FUNC_Native, FUNC_Static = 0x400, 0x2000
 
 PREDICATE = re.compile(r"^(?:[Ss]_|[Cc]_|[Ss]erver_|[Cc]lient_)?(?:[Cc]an|[Ii]s|[Hh]as|[Ss]hould|[Gg]et|[Ff]ind|[Cc]heck|[Nn]eeds?|[Ww]ill|[Dd]oes|[Ww]ould|[Vv]alidate|[Cc]ompute|[Cc]alc|[Qq]uery|[Cc]ontains|[Cc]ount)(?=[A-Z_0-9]|$)")
-NAME_OK = lambda n: bool(G.GIVE_STRONG.search(n) or G.MONEY.search(n)) and "__delegatesignature" not in n.lower() and not PREDICATE.search(n)
+UPDATE_ITEM = re.compile(r"(?i)^(?:update|change|modify|adjust)\w*(?:item|inventory|loot|resource|material)\w*(?:count|amount|quantit|num)")   # Alien: UpdateItemCount(Tag, CountDelta)
+NAME_OK = lambda n: bool(G.GIVE_STRONG.search(n) or G.MONEY.search(n) or UPDATE_ITEM.search(n)) and "__delegatesignature" not in n.lower() and not PREDICATE.search(n)
 NEG = re.compile(r"(?i)notify|widget|preview|shop|sell|remove|spawn|effect|anim|tutorial|display|achiev|ability|price|cost|log|event$|^on|^k2_|delegate|rpc|sound|audio|vfx|fx|analytic|telemetry|record|track|stat$")
 COUNT_NAME = re.compile(r"(?i)^(count|quantity|qty|amount|num|number|stacks?|stack_?count|item_?count|delta|value|new_?amount|add_?amount|in_?amount)$|stack|amount|count|quantity")
 ID_INT_NAME = re.compile(r"(?i)^(id|item_?id|row_?id|index|key)$|item.?(id|index|key)")
@@ -31,7 +32,7 @@ SKIP_CLS = re.compile(r"(?i)mesh|material|texture|skelet|anim|sound|audio|niagar
 SKIP_PROP = re.compile(r"(?i)^(outer|owner|persistentlevel|levels|streaminglevels|currentlevel|levelcollections|netdriver|demonetdriver|actors|allactors|world|worldsettings|navigationsystem|physicsscene|aisystem|audiodevice|controllingnetdriver)$")
 
 
-ACTION = re.compile(r"(?i)(add|give|grant|obtain|acquire|gain|receive|award|pick_?up|collect|insert|earn|increase)")
+ACTION = re.compile(r"(?i)(add|give|grant|obtain|acquire|gain|receive|award|pick_?up|collect|insert|earn|increase|update|adjust)")
 ITEM_WORD = re.compile(r"(?i)(item|inventory|loot|stack|material|resource|pickup|weapon|equip|ingredient|consumable|artifact|relic|organ|gear|accessory|card)")
 INV_OWNER = re.compile(r"(?i)inventory|item|bag|backpack|storage|loot|equip")
 ENGINE_OWNER = re.compile(r"(?i)geometry|niagara|slate|widget|listview|treeview|material|mesh|anim|sequenc|chaos|landscape|metasound|audio|movie|libraryfunctions|rig|spline|splinecomponent|texture|render|physics|navigation|mass|statetree|dataprep|datasmith|usd|interchange|mediaplayer|paper2d|foliage|decal|vehicle|camera|light|sound|particle|cinematic")
@@ -41,6 +42,20 @@ MIN_ITEM, MIN_MONEY = 7.5, 6.5
 
 class PEError(Exception):
     pass
+
+
+def name_raw(e, idx):
+    """The FNamePool entry of FName index `idx` in the dump as bytes (header + characters): identifies the name in any session, because
+    indices move between sessions of the same game (measured, Stupid Never Dies: 64 of 1315 gameplay tags kept theirs, 9902 of 10575
+    function names). None when it cannot be searched live: older name tables, outline numbers, a pool in the heap (Wonderlands)."""
+    p = e.pool
+    if not isinstance(p, ueobj.NamePool) or e.outline_number or not e.d.base <= p.addr < e.d.exe_end:
+        return None
+    a = p.entry(idx)
+    hdr = e.d.u16(a) if a else None
+    if not hdr or not hdr >> 6:
+        return None
+    return e.d.read(a, 2 + (hdr >> 6) * (2 if hdr & 1 else 1))
 
 
 # ============================================================ calling code in the game: both ps4debug APIs =========================
@@ -427,6 +442,75 @@ def object_catalog(e, cls):
     return out
 
 
+def _gt_struct(e, kp):
+    sp = e.ptr(kp + e.O["StructProperty_Struct"]) if kp and e.ffield_class_name(kp) == "StructProperty" else 0
+    return bool(sp) and e.name(sp) == "GameplayTag"
+
+
+def tagmap_catalog(e):
+    """Items whose identity is an FGameplayTag and whose definitions are objects held in a TMap<FGameplayTag, Object*> (an asset cache /
+    registry of the game: Alien MNInventorySubsystem.InventoryAssetCache): the biggest such map of a live object, tag -> data asset.
+    Gives the game's real item list (category = the tag's first two segments, limits from the asset's own MaxCapacityCount-like member)."""
+    import ueitems as U
+    ocls = CF["Class"]
+    own = {}                                           # class -> [(map offset, value offset, stride, value class)]
+    for i, o in e.arr:
+        if not e.isa(o, ocls):
+            continue
+        for p in e.properties(o):
+            if e.ffield_class_name(p) != "MapProperty":
+                continue
+            kp, vp = e.ptr(p + e.O["MapProperty_Base"]), e.ptr(p + e.O["MapProperty_Base"] + 8)
+            if not _gt_struct(e, kp) or not vp or e.ffield_class_name(vp) != "ObjectProperty":
+                continue
+            if not (ITEM_WORD.search(e.ffield_name(p) or "") or INV_OWNER.search(e.name(o) or "")):
+                continue                                # a tag -> montage / ability map of some actor is not the item list
+            vo = (e.prop_size(kp) + 7) & ~7
+            own.setdefault(o, []).append((e.prop_offset(p), vo, vo + 8 + 8, e.ptr(vp + e.O["ObjectProperty_Class"])))
+    if not own:
+        return []
+    eff = {}
+
+    def maps(c):
+        if c not in eff:
+            eff[c] = []
+            x, n = c, 0
+            while x and n < 40:
+                eff[c] += own.get(x, [])
+                x, n = e.super(x), n + 1
+        return eff[c]
+    best = []
+    for i, o in e.arr:
+        c = e.cls(o)
+        if not c or (e.flags(o) or 0) & RF_ClassDefaultObject:
+            continue
+        for moff, vo, stride, vcls in maps(c):
+            arr, num = e.u64(o + moff), e.i32(o + moff + 8) or 0
+            if not arr or not 4 <= num <= 20000:
+                continue
+            got = []
+            for j in range(num):
+                a = arr + j * stride
+                ti, tn, v = e.i32(a), e.i32(a + 4) or 0, e.u64(a + vo)
+                nm = e.pool.name(ti, tn) if ti else None
+                if nm and TAG_RE.match(nm) and v and e.cls(v):
+                    got.append((nm, ti, tn, v))
+            if len(got) > len(best):
+                best = got
+    if len(best) < 4:
+        return []
+    out, lims = [], {}
+    for nm, ti, tn, v in best:
+        c = e.cls(v)
+        if c not in lims:
+            lims[c] = U.limit_fields(e, c)
+        lb, lw, ls = U.read_limits(e, v, lims[c])
+        out.append(dict(id=nm, idx=ti, num=tn, cat=".".join(nm.split(".")[:2]), price=None, lim_bag=lb, lim_ware=lw, lim_stack=ls,
+                        sort=0, table=e.name(c) or "", numid=0, asset=e.name(v) or ""))
+    out.sort(key=lambda x: (x["cat"], x["id"]))
+    return out
+
+
 TAG_ROOT = re.compile(r"(?i)^(items?|inventory|loot|pick_?ups?|consumables?|materials?|resources?|ingredients?)$")
 TAG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$")
 
@@ -473,6 +557,7 @@ class LiveGraph:
         self.e, self.dbg, self.pid, self.gworld, self.say = e, dbg, pid, gworld, say
         self.max_nodes, self.max_depth = max_nodes, max_depth
         self.kc, self.sc, self.found, self.seen, self.paths = {}, {}, {}, set(), {}
+        self.names = {}
         O = e.O
         self.o_name, self.o_cls, self.o_sup, self.o_size = O["UObject_Name"], O["UObject_Class"], O["UStruct_SuperStruct"], O["UStruct_Size"]
 
@@ -612,6 +697,36 @@ class LiveGraph:
                 f = struct.unpack_from("<Q", h, o_next)[0]
         return None
 
+    async def live_name(self, idx):
+        """FName index in THIS session of the dump's name `idx`, searched in the live FNamePool when it moved."""
+        if idx in self.names:
+            return self.names[idx]
+        raw, p = name_raw(self.e, idx), self.e.pool
+        out = idx
+        if raw:
+            mask = (1 << p.block_bits) - 1
+            bp = await self.rd(p.addr + 0x10 + (idx >> p.block_bits) * 8, 8)
+            at = await self.rd(struct.unpack("<Q", bp)[0] + (idx & mask) * p.stride, len(raw)) if bp else None
+            if at != raw:
+                out = await self._search_name(raw, p)
+        self.names[idx] = out
+        return out
+
+    async def _search_name(self, raw, p):
+        head = await self.rd(p.addr + 8, 8)
+        if not head:
+            raise PEError("FNamePool not readable")
+        cur, cursor = struct.unpack("<ii", head)
+        for b in range(cur + 1):
+            bp = await self.rd(p.addr + 0x10 + b * 8, 8)
+            data = await self.rd(struct.unpack("<Q", bp)[0], cursor if b == cur else (1 << p.block_bits) * p.stride) if bp else None
+            at = data.find(raw) if data else -1
+            while at >= 0 and at % p.stride:
+                at = data.find(raw, at + 1)
+            if at >= 0:
+                return (b << p.block_bits) | (at // p.stride)
+        raise PEError(f"name {raw[2:].decode('latin1')} does not exist in this session (not loaded yet?)")
+
     async def valid_object(self, a, dump_obj):
         """is the object at live address `a` the same one as the dump's `dump_obj` (same FName and class pointer)?"""
         raw = await self.rd(a, 0x20)
@@ -665,7 +780,7 @@ async def call_live(e, dbg, pid, graph, fn, item, count, pe_index, stub, say=pri
     if not head:
         raise PEError(f"cannot read the object at {obj:#x}")
     ocls = fcls or struct.unpack_from("<Q", head, graph.o_cls)[0]
-    func = await graph.live_function(ocls, name_idx)
+    func = await graph.live_function(ocls, await graph.live_name(name_idx))
     if not func:
         raise PEError(f"{fn['name']} not found in the live class of the object ({fn['owner']} changed in this build?)")
     size = max([p["off"] + p["size"] for p in fn["params"]] + [8])
@@ -680,7 +795,7 @@ async def call_live(e, dbg, pid, graph, fn, item, count, pe_index, stub, say=pri
                                   "take a new dump (Make Dump+SDK) with the game running, scan again")
                 buf[o:o + 8] = struct.pack("<Q", ca)
             elif p["type"] == "FName":
-                buf[o:o + 8] = struct.pack("<Q", (item["idx"] | (item["num"] << 32)) & (2**64 - 1))
+                buf[o:o + 8] = struct.pack("<Q", (await graph.live_name(item["idx"]) | (item["num"] << 32)) & (2**64 - 1))
             else:
                 buf[o:o + p["size"]] = _pack(p, item["numid"])
         elif r == "count":

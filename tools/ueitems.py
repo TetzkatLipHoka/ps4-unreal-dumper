@@ -586,7 +586,7 @@ def do_scan(dump):
             items = cat(e, idp["meta_addr"]) if idp.get("meta_addr") else []
         elif idp and idp.get("sname") == "GameplayTag":
             import ueitems_pe
-            items = ueitems_pe.tag_catalog(e)
+            items = ueitems_pe.tagmap_catalog(e) or ueitems_pe.tag_catalog(e)      # the game's own tag -> asset map first, else the tag names
         else:
             items = build_catalog_generic(e, need_numid=idkind != "FName")
         log(f"{len(items)} items in the generic catalog")
@@ -781,10 +781,20 @@ async def give_live(dump, host, pairs, force=False, rpc=False):
         sys.exit(f"module base {cache['base']:#x} of the dump is not readable in this session (other binary/base?)")
     stub = await ueitems_pe.get_stub(dbg, pid, os.path.join(os.path.dirname(os.path.abspath(dump)), "rpc_stub.txt"))
     pe_ctx, refused, used = None, [], None
+
+    async def context():                               # the dump is only opened when needed (class layouts, names)
+        e = ueobj.open_engine(dump, log=log)
+        meta = json.load(open(os.path.join(os.path.dirname(os.path.abspath(dump)), "SDK", "offsets.json")))
+        gw = struct.unpack("<Q", await dbg.read_memory(pid, cache["base"] + meta["gworld"], 8) or bytes(8))[0]
+        gw or sys.exit("GWorld is null (loading? start the game first)")
+        return e, ueitems_pe.LiveGraph(e, dbg, pid, gw, say=log), meta["process_event_index"]
     for iid, it, fns, n in jobs:
         errs, done = [], False
         for fn in fns:
             if fn.get("via") != "pe":                  # native static function: direct call
+                if it and any(p["role"] == "id" and p["type"] == "FName" for p in fn["params"]):
+                    pe_ctx = pe_ctx or await context()
+                    it = dict(it, idx=await pe_ctx[1].live_name(it["idx"]))
                 a = give_args(fn, it or {"idx": 0, "num": 0, "numid": 0}, n)
                 rax = await ueitems_pe.rpc_call(dbg, pid, cache["base"] + fn["impl_rva"], a[:len(fn["params"])], stub)
                 no = (fn.get("ret") or "").split()[-1:] == ["bool"] and rax is not None and not int(rax) & 0xFF
@@ -794,13 +804,7 @@ async def give_live(dump, host, pairs, force=False, rpc=False):
                 used = used or (None if iid.startswith("$") else fkey(fn))
                 done = True
                 break
-            if pe_ctx is None:                         # the dump is only opened for the ProcessEvent route (class layouts)
-                e = ueobj.open_engine(dump, log=log)
-                meta = json.load(open(os.path.join(os.path.dirname(os.path.abspath(dump)), "SDK", "offsets.json")))
-                gw = struct.unpack("<Q", await dbg.read_memory(pid, cache["base"] + meta["gworld"], 8) or bytes(8))[0]
-                gw or sys.exit("GWorld is null (loading? start the game first)")
-                graph = ueitems_pe.LiveGraph(e, dbg, pid, gw, say=log)
-                pe_ctx = (e, graph, meta["process_event_index"])
+            pe_ctx = pe_ctx or await context()
             e, graph, pe_idx = pe_ctx
             try:
                 rax, no = await ueitems_pe.call_live(e, dbg, pid, graph, fn, it, n, pe_idx, stub, say=log, rpc=rpc)
@@ -900,7 +904,7 @@ async def pe_check(dump, host, iid):
                 ok = ok and cur == bfs
     # 3. the UFunction by FName index
     ufn = e.find_in_outer(fn["name"], fn["owner"])
-    idx = e.i32(ufn + O["UObject_Name"])
+    idx = await graph.live_name(e.i32(ufn + O["UObject_Name"]))
     if obj:
         head = await graph.rd(obj, 0x20)
         func = await graph.live_function(struct.unpack_from("<Q", head, graph.o_cls)[0], idx) if head else None
@@ -909,7 +913,7 @@ async def pe_check(dump, host, iid):
     # 4. the item class
     ca = it.get("class_addr")
     if ca:
-        want = e.i32(ca + O["UObject_Name"])
+        want = await graph.live_name(e.i32(ca + O["UObject_Name"]))
         raw = await graph.rd(ca, 0x20)
         live_idx = struct.unpack_from("<i", raw, graph.o_name)[0] if raw else None
         print(f"4. item class {it['id']}: dump address {ca:#x}, name index in dump {want:#x}, live at that address: {live_idx and hex(live_idx)}  -> {'OK' if live_idx == want else 'NOT THE SAME in this session'}")
