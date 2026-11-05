@@ -879,8 +879,8 @@ async def pe_check(dump, host, iid):
         if ch:
             lines = ueitems_tlh.pe_block(e, dump, cache, [(1, iid, "1")], meta)[0]
             offs = []
-            for l in lines[lines.index("mov byte ptr [Flag1], 2") + 1:]:
-                if l.startswith("pe1_ok"):
+            for l in lines[lines.index("peg0:") + 1:]:
+                if l == "mov rbx, rcx":
                     break
                 m = _re.match(r"mov rcx, \[rcx\+(0x[0-9a-f]+)\]$", l)
                 if m:

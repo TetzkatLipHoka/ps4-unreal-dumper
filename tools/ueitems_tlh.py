@@ -109,7 +109,7 @@ def _arg_lines(fn, k, numid, idx, num, count_cell, lim=None):
         r32, r64 = GI32[n], GI64[n]
         if p["role"] == "id":
             if p["type"] == "FName":
-                out += [f"mov {r32}, {idx}"] + ([f"movabs rax, {num << 32:#x}", f"or {r64}, rax"] if num else [])   # idx: r11d after name_scan, or 0
+                out += [f"mov {r32}, {idx}"] + ([f"movabs rax, {num << 32:#x}", f"or {r64}, rax"] if num else [])   # idx: r11d after name_routine, or 0
             else:
                 out.append(f"mov {r32}, {numid}")
         elif p["role"] == "count":
@@ -141,9 +141,14 @@ def give_block(cache, specs, e, meta):
             body = _arg_lines(money, k, 0, 0, 0, f"Val{k}") + ["movabs rax, GiveMoney", "call rax"]
         else:
             it = cat.get(iid.lower()) or sys.exit(f"item rule: {iid} is not in the item catalog of this dump (scan again?)")
-            scan = name_scan(f"gv{k}_", e, it["idx"], f"gv{k}_end") if any(p["role"] == "id" and p["type"] == "FName" for p in item["params"]) else []
+            scan = []
+            if any(p["role"] == "id" and p["type"] == "FName" for p in item["params"]):
+                hdr, h = name_ref(e, it["idx"])
+                scan = [f"mov esi, {hdr:#x}", f"mov edi, {h:#x}", "call gvname", "cmp r11d, -1", f"je gv{k}_end"]
             body = scan + _arg_lines(item, k, it["numid"], "r11d", it["num"], f"Val{k}", item_limit(it)) + ["movabs rax, GiveItem", "call rax"]
         code += [f"cmp byte ptr [Flag{k}], 1", f"jne gv{k}_end", f"mov byte ptr [Flag{k}], 2"] + body + [f"gv{k}_end:"]
+    if any("call gvname" in l for l in code):
+        code += ["jmp gvskip"] + name_routine("gvname", e) + ["gvskip:"]
     code += ["add rsp, 8"] + [f"pop {r}" for r in reversed(saved)]
     if money and any(i.lower() == "$money" for _, i, _ in specs):
         syms.append(f"RegisterSymbol( GiveMoney, ModuleBase+{money['impl_rva']:#x} )")
@@ -152,7 +157,7 @@ def give_block(cache, specs, e, meta):
 
 # ---- give functions that run through ProcessEvent (instance / Blueprint / UClass* parameters) --------------------------------------
 PE_BUF = 0x20            # parameter buffer at [rsp+0x20]
-PE_MAX = 0x58
+PE_MAX = 0x58            # ends at PE_COUNT
 
 
 def pe_instance_chain(e, dump, cache, fn):
@@ -198,132 +203,174 @@ def pe_instance_chain(e, dump, cache, fn):
     return fn["chain"]
 
 
-def name_scan(P, e, idx, fail):
-    """asm: r11d = this session's FName index of the dump's name `idx`, by walking the FNamePool and comparing the raw entry (indices move
-    between sessions, see ueitems_pe.name_raw); jumps to `fail` if the name does not exist. Clobbers rax, rcx, rdx, r8-r11.
-    Only runs when a cheat is switched on. Name tables that cannot be walked keep the dump's index (valid for the dump's session only)."""
+def fnv1a(b):
+    h = 0x811c9dc5
+    for x in b:
+        h = ((h ^ x) * 0x1000193) & 0xffffffff
+    return h
+
+
+def name_ref(e, idx):
+    """(header, FNV-1a of the characters) of the dump's FName `idx`, for name_routine: two constants per name, whatever its length.
+    (0, idx) when the name table cannot be walked: that index is valid for the dump's session only.
+    ponytail: 32-bit hash, one in ~10^4 items could hit another name of the same header; compare the characters if one ever does."""
     import ueitems_pe
     raw = ueitems_pe.name_raw(e, idx)
     if not raw:
         print(f"   warning: name {e.pool.name(idx)} is fixed to this dump's session (name table not searchable)")
-        return [f"mov r11d, {idx:#x}"]
+        return 0, idx
+    return int.from_bytes(raw[:2], "little"), fnv1a(raw[2:])
+
+
+def name_routine(L, e):
+    """asm subroutine {L}: esi = header, edi = hash -> r11d = this session's FName index (indices move between sessions, see
+    ueitems_pe.name_raw), -1 if the name does not exist; esi = 0: r11d = edi. Walks the FNamePool, only runs when a cheat is switched on.
+    Clobbers rax, rcx, rdx, r8-r11."""
+    head = [f"{L}:", "test esi, esi", f"jnz {L}w", "mov r11d, edi", "ret", f"{L}w:"]
+    import ueitems_pe
+    if not ueitems_pe.name_raw(e, 0):                         # no walkable table in this game: only fixed indices reach this
+        return head + ["mov r11d, -1", "ret"]
     p = e.pool
     st = p.stride
-    out = ["lea r8, [GNames]", "mov r9d, dword ptr [r8+8]", "xor r10d, r10d",
-           f"{P}b:", "cmp r10d, r9d", f"jg {fail}",
-           "mov rcx, qword ptr [r8+r10*8+0x10]", "test rcx, rcx", f"jz {P}x",
-           f"mov edx, {(1 << p.block_bits) * st:#x}", "cmp r10d, r9d", f"jne {P}c", "mov edx, dword ptr [r8+0xc]", f"{P}c:", "add rdx, rcx",
-           f"{P}e:", "cmp rcx, rdx", f"jae {P}x",
-           f"cmp word ptr [rcx], {int.from_bytes(raw[:2], 'little'):#x}", f"jne {P}a"]
-    i = 2
-    while i < len(raw):                                       # the characters, 8 bytes at a time
-        n = next(x for x in (8, 4, 2, 1) if x <= len(raw) - i)
-        v = int.from_bytes(raw[i:i + n], "little")
-        if n == 8:
-            out += [f"movabs rax, {v:#x}", f"cmp qword ptr [rcx+{i:#x}], rax"]
-        else:
-            out.append(f"cmp {dict([(4, 'dword'), (2, 'word'), (1, 'byte')])[n]} ptr [rcx+{i:#x}], {v:#x}")
-        out.append(f"jne {P}a")
-        i += n
-    out += ["mov rax, rcx", "sub rax, qword ptr [r8+r10*8+0x10]"] + ([f"shr rax, {st.bit_length() - 1}"] if st > 1 else []) + \
-           ["mov r11d, r10d", f"shl r11d, {p.block_bits}", "or r11d, eax", f"jmp {P}d",
-            f"{P}a:", "movzx eax, word ptr [rcx]", "mov r11d, eax", "shr r11d, 6", f"jz {P}x",       # length 0: the rest of the block is unused
-            "test eax, 1", f"jz {P}w", "add r11d, r11d", f"{P}w:", f"add r11d, {2 + st - 1}", f"and r11d, {-st & 0xffffffff:#x}", "add rcx, r11", f"jmp {P}e",
-            f"{P}x:", "inc r10d", f"jmp {P}b", f"{P}d:"]
-    return out
+    return head + ["push r12", "push r13", "lea r8, [GNames]", "mov r9d, dword ptr [r8+8]", "xor r10d, r10d",
+                   f"{L}b:", "cmp r10d, r9d", f"jg {L}no",
+                   "mov rax, qword ptr [r8+r10*8+0x10]", "test rax, rax", f"jz {L}x",
+                   f"mov edx, {(1 << p.block_bits) * st:#x}", "cmp r10d, r9d", f"jne {L}c", "mov edx, dword ptr [r8+0xc]", f"{L}c:", "add rdx, rax",
+                   f"{L}e:", "cmp rax, rdx", f"jae {L}x",
+                   "movzx ecx, word ptr [rax]", "cmp ecx, esi", f"jne {L}a",
+                   "shr ecx, 6", "test esi, 1", f"jz {L}h", "add ecx, ecx", f"{L}h:",
+                   "lea r12, [rax+2]", "mov r11d, 0x811c9dc5",
+                   f"{L}l:", "movzx r13d, byte ptr [r12]", "xor r11d, r13d", "imul r11d, r11d, 0x1000193", "inc r12", "dec ecx", f"jnz {L}l",
+                   "cmp r11d, edi", f"je {L}f", "mov ecx, esi",
+                   f"{L}a:", "mov r11d, ecx", "shr r11d, 6", f"jz {L}x",                  # length 0: the rest of the block is unused
+                   "test ecx, 1", f"jz {L}s", "add r11d, r11d", f"{L}s:", f"add r11d, {2 + st - 1}", f"and r11d, {-st & 0xffffffff:#x}", "add rax, r11", f"jmp {L}e",
+                   f"{L}f:", "sub rax, qword ptr [r8+r10*8+0x10]"] + ([f"shr rax, {st.bit_length() - 1}"] if st > 1 else []) + \
+                  ["mov r11d, r10d", f"shl r11d, {p.block_bits}", "or r11d, eax", f"jmp {L}r",
+                   f"{L}x:", "inc r10d", f"jmp {L}b",
+                   f"{L}no:", "mov r11d, -1",
+                   f"{L}r:", "pop r13", "pop r12", "ret"]
 
 
-def _find_obj_by_name(P, idx, meta, e, fail, num=0):
-    """asm: rax = first live object named like the dump's FName `idx` (walks the GObjects array); jumps to `fail` if none. Clobbers r8-r11, r13-r15, rcx, rdx."""
+def object_routine(L, meta, e):
+    """asm subroutine {L}: r11d = FName index, ecx = FName number -> rax = first live object of that name, 0 if none (walks the GObjects
+    array). Clobbers rdx, r13-r15."""
     lay, isz, ooff = meta["gobjects_layout"], meta["fuobjectitem_size"], meta.get("fuobjectitem_object_offset", 0)
     per = e.arr.per_chunk
     if len(lay) != 5 or per & (per - 1):
         sys.exit("this game's GObjects array layout is not supported by the ProcessEvent cheat export yet")
-    sh = per.bit_length() - 1
-    return name_scan(P + "s", e, idx, fail) + ["lea r14, [GObjects]", f"mov r15d, dword ptr [r14+{lay[2]:#x}]", f"mov r13, qword ptr [r14+{lay[0]:#x}]", "test r13, r13", f"jz {fail}",
+    return [f"{L}:", "lea r14, [GObjects]", f"mov r15d, dword ptr [r14+{lay[2]:#x}]", f"mov r13, qword ptr [r14+{lay[0]:#x}]", "test r13, r13", f"jz {L}z",
             "xor r14d, r14d",
-            f"{P}o:", "cmp r14d, r15d", f"jge {fail}",
-            "mov eax, r14d", f"shr eax, {sh}", "mov rax, qword ptr [r13+rax*8]", "test rax, rax", f"jz {P}n",
-            "mov ecx, r14d", f"and ecx, {per - 1:#x}", f"imul rcx, rcx, {isz}", f"mov rax, qword ptr [rax+rcx+{ooff:#x}]" if ooff else "mov rax, qword ptr [rax+rcx]",
-            "test rax, rax", f"jz {P}n",
-            f"cmp dword ptr [rax+{e.O['UObject_Name']:#x}], r11d", f"jne {P}n",
-            f"cmp dword ptr [rax+{e.O['UObject_Name'] + 4:#x}], {num}", f"jne {P}n", f"jmp {P}f",
-            f"{P}n:", "inc r14d", f"jmp {P}o", f"{P}f:"]
+            f"{L}o:", "cmp r14d, r15d", f"jge {L}z",
+            "mov eax, r14d", f"shr eax, {per.bit_length() - 1}", "mov rax, qword ptr [r13+rax*8]", "test rax, rax", f"jz {L}n",
+            f"mov edx, r14d", f"and edx, {per - 1:#x}", f"imul rdx, rdx, {isz}", f"mov rax, qword ptr [rax+rdx+{ooff:#x}]" if ooff else "mov rax, qword ptr [rax+rdx]",
+            "test rax, rax", f"jz {L}n",
+            f"cmp dword ptr [rax+{e.O['UObject_Name']:#x}], r11d", f"jne {L}n",
+            f"cmp dword ptr [rax+{e.O['UObject_Name'] + 4:#x}], ecx", f"jne {L}n", "ret",
+            f"{L}n:", "inc r14d", f"jmp {L}o",
+            f"{L}z:", "xor eax, eax", "ret"]
 
 
-def _pe_one(e, dump, k, fn, chain, it, meta, cache):
+# frame of a give routine: the rule's values behind the parameter buffer
+PE_FRAME = 0x98          # return address + this = 16-aligned at the ProcessEvent call
+PE_COUNT, PE_HDR, PE_HASH, PE_NUM = 0x78, 0x7c, 0x80, 0x84
+
+
+def give_routine(L, e, fn, chain, meta):
+    """asm subroutine {L} for one give function, shared by all its rules: edx = amount, esi/edi/ecx = the item (name_ref + FName number, or
+    edi = its number for an int id). Finds the live object (pointer chain from GWorld, or the class by name for static functions) and the
+    UFunction (class chain), builds the parameter buffer and calls ProcessEvent (re-entering the hook with the flag already at 2, so it
+    passes straight through)."""
     import uecheat
     from ueobj import CF
     O = e.O
-    P = f"pe{k}_"
     owner = e.find(fn["owner"], CF["Class"])
     ufn = e.find_in_outer(fn["name"], fn["owner"])
     if not owner or not ufn:
         sys.exit(f"{fn['owner']}::{fn['name']} is not in this dump (scan again)")
-    fidx = e.i32(ufn + O["UObject_Name"])
     size = max([p["off"] + p["size"] for p in fn["params"]] + [8])
     if size > PE_MAX or any(p["role"] == "pawn" for p in fn["params"]):
         sys.exit(f"{fn['owner']}::{fn['name']}: parameter layout not supported by the cheat export (size {size:#x}"
                  f"{', needs the player pawn' if any(p['role'] == 'pawn' for p in fn['params']) else ''}); Give now works")
-    out = [f"cmp byte ptr [Flag{k}], 1", f"jne {P}end", f"mov byte ptr [Flag{k}], 2"]
+    out_l = f"{L}out"
+
+    def name_of(idx):
+        hdr, h = name_ref(e, idx)
+        return [f"mov esi, {hdr:#x}", f"mov edi, {h:#x}", "call pegname", "cmp r11d, -1", f"je {out_l}"]
+    out = [f"{L}:", f"sub rsp, {PE_FRAME:#x}", f"mov dword ptr [rsp+{PE_COUNT:#x}], edx", f"mov dword ptr [rsp+{PE_HDR:#x}], esi",
+           f"mov dword ptr [rsp+{PE_HASH:#x}], edi", f"mov dword ptr [rsp+{PE_NUM:#x}], ecx"]
     if chain is None:                                         # static / `this` never read: class by name, `this` = GWorld (ignored)
-        out += _find_obj_by_name(P + "c", e.i32(owner + O["UObject_Name"]), meta, e, f"{P}end")
-        out += ["mov r13, rax", "mov rbx, [GWorld]", "test rbx, rbx", f"jz {P}end"]
+        out += name_of(e.i32(owner + O["UObject_Name"])) + ["xor ecx, ecx", "call pegobj", "test rax, rax", f"jz {out_l}",
+                                                            "mov r13, rax", "mov rbx, [GWorld]", "test rbx, rbx", f"jz {out_l}"]
     else:
-        out += ["mov rcx, [GWorld]", "test rcx, rcx", f"jz {P}end"]
-        uecheat.path_code(e, uecheat.cls_of(e, "World"), chain["hops"], "rcx", f"{P}end", out)
-        out += ["test rcx, 7", f"jnz {P}end", "test rcx, rcx", f"jz {P}end", "mov rbx, rcx", f"mov r13, [rbx+{O['UObject_Class']:#x}]"]
-    out += name_scan(P + "fs", e, fidx, f"{P}end")
-    out += ["mov r15d, r11d", "mov r14d, 0x4000",                             # UFunction: walk the class chain, compare FName index
-            f"{P}cl:", "test r13, r13", f"jz {P}end",
+        out += ["mov rcx, [GWorld]", "test rcx, rcx", f"jz {out_l}"]
+        uecheat.path_code(e, uecheat.cls_of(e, "World"), chain["hops"], "rcx", out_l, out)
+        out += ["test rcx, 7", f"jnz {out_l}", "test rcx, rcx", f"jz {out_l}", "mov rbx, rcx", f"mov r13, [rbx+{O['UObject_Class']:#x}]"]
+    out += name_of(e.i32(ufn + O["UObject_Name"]))
+    out += ["mov r14d, 0x4000",                               # UFunction: walk the class chain
+            f"{L}cl:", "test r13, r13", f"jz {out_l}",
             f"mov r12, [r13+{O['UStruct_Children']:#x}]",
-            f"{P}fn:", "test r12, r12", f"jz {P}sp", "dec r14d", f"jz {P}end",
-            f"cmp dword ptr [r12+{O['UObject_Name']:#x}], r15d", f"je {P}ok",
-            f"mov r12, [r12+{O['UField_Next']:#x}]", f"jmp {P}fn",
-            f"{P}sp:", f"mov r13, [r13+{O['UStruct_SuperStruct']:#x}]", f"jmp {P}cl",
-            f"{P}ok:"]
-    for o in range(0, (size + 7) & ~7, 8):                                    # zero the parameter buffer
+            f"{L}fn:", "test r12, r12", f"jz {L}sp", "dec r14d", f"jz {out_l}",
+            f"cmp dword ptr [r12+{O['UObject_Name']:#x}], r11d", f"je {L}ok",
+            f"mov r12, [r12+{O['UField_Next']:#x}]", f"jmp {L}fn",
+            f"{L}sp:", f"mov r13, [r13+{O['UStruct_SuperStruct']:#x}]", f"jmp {L}cl",
+            f"{L}ok:"]
+    for o in range(0, (size + 7) & ~7, 8):                    # zero the parameter buffer
         out.append(f"mov qword ptr [rsp+{PE_BUF + o:#x}], 0")
     for p in fn["params"]:
         r, o = p["role"], PE_BUF + p["off"]
         if r == "id":
-            if p["type"] in ("UClass", "UObject"):
-                ca = (it or {}).get("class_addr") or sys.exit(f"{it and it['id']} has no class in the catalog (scan again)")
-                out += _find_obj_by_name(P + "i", e.i32(ca + O["UObject_Name"]), meta, e, f"{P}end", e.i32(ca + O["UObject_Name"] + 4) or 0)
-                out.append(f"mov qword ptr [rsp+{o:#x}], rax")
-            elif p["type"] == "FName":
-                out += name_scan(P + "is", e, it["idx"], f"{P}end") + [f"mov dword ptr [rsp+{o:#x}], r11d", f"mov dword ptr [rsp+{o + 4:#x}], {it['num']}"]
+            if p["type"] not in ("UClass", "UObject", "FName"):
+                out += [f"mov eax, dword ptr [rsp+{PE_HASH:#x}]", f"mov dword ptr [rsp+{o:#x}], eax"]
             else:
-                out += [f"mov dword ptr [rsp+{o:#x}], {it['numid']}"]
+                out += [f"mov esi, dword ptr [rsp+{PE_HDR:#x}]", f"mov edi, dword ptr [rsp+{PE_HASH:#x}]", "call pegname", "cmp r11d, -1", f"je {out_l}"]
+                if p["type"] == "FName":
+                    out += [f"mov dword ptr [rsp+{o:#x}], r11d", f"mov eax, dword ptr [rsp+{PE_NUM:#x}]", f"mov dword ptr [rsp+{o + 4:#x}], eax"]
+                else:
+                    out += [f"mov ecx, dword ptr [rsp+{PE_NUM:#x}]", "call pegobj", "test rax, rax", f"jz {out_l}", f"mov qword ptr [rsp+{o:#x}], rax"]
         elif r == "count":
             if p["ptype"] not in ("IntProperty", "UInt32Property", "Int64Property"):
                 sys.exit(f"{fn['name']}: amount parameter is {p['ptype']}, only integers are supported in the cheat export")
-            lim = item_limit(it)
-            out += [f"mov eax, dword ptr [Val{k}]"] + ([f"mov ecx, {lim}", "cmp eax, ecx", "cmovg eax, ecx"] if lim else []) + \
-                   ([f"mov dword ptr [rsp+{o:#x}], eax"] if p["size"] <= 4 else ["movsxd rax, eax", f"mov qword ptr [rsp+{o:#x}], rax"])
+            out += [f"mov eax, dword ptr [rsp+{PE_COUNT:#x}]"] + ([f"mov dword ptr [rsp+{o:#x}], eax"] if p["size"] <= 4 else ["movsxd rax, eax", f"mov qword ptr [rsp+{o:#x}], rax"])
         elif r == "world":
             out += ["mov rax, [GWorld]", f"mov qword ptr [rsp+{o:#x}], rax"]
         elif r == "full":
             out.append(f"mov dword ptr [rsp+{o:#x}], 0x3f800000")          # 1.0f
         elif r == "pc":                                                       # the local PlayerController, as the hook walks it
-            out += ["mov rcx, [GWorld]", "test rcx, rcx", f"jz {P}end"]
-            uecheat.path_code(e, uecheat.cls_of(e, "World"), ["OwningGameInstance", "LocalPlayers[0]", "PlayerController"], "rcx", f"{P}end", out)
+            out += ["mov rcx, [GWorld]", "test rcx, rcx", f"jz {out_l}"]
+            uecheat.path_code(e, uecheat.cls_of(e, "World"), ["OwningGameInstance", "LocalPlayers[0]", "PlayerController"], "rcx", out_l, out)
             out.append(f"mov qword ptr [rsp+{o:#x}], rcx")
-    out += ["mov rdi, rbx", "mov rsi, r12", f"lea rdx, [rsp+{PE_BUF:#x}]", "movabs rax, ProcessEvt", "call rax", f"{P}end:"]
+    out += ["mov rdi, rbx", "mov rsi, r12", f"lea rdx, [rsp+{PE_BUF:#x}]", "movabs rax, ProcessEvt", "call rax",
+            f"{out_l}:", f"add rsp, {PE_FRAME:#x}", "ret"]
     return out
 
 
+def item_args(e, it, fn):
+    """Lines that load esi/edi/ecx for give_routine: the item as name_ref + FName number, or as its number for an int id."""
+    idp = next((p for p in fn["params"] if p["role"] == "id"), None)
+    if not idp or not it:
+        return ["xor esi, esi", "xor edi, edi", "xor ecx, ecx"]
+    if idp["type"] in ("UClass", "UObject"):
+        ca = it.get("class_addr") or sys.exit(f"{it['id']} has no class in the catalog (scan again)")
+        idx, num = e.i32(ca + e.O["UObject_Name"]), e.i32(ca + e.O["UObject_Name"] + 4) or 0
+    elif idp["type"] == "FName":
+        idx, num = it["idx"], it["num"]
+    else:
+        return ["xor esi, esi", f"mov edi, {it['numid'] & 0xffffffff:#x}", "xor ecx, ecx"]
+    hdr, h = name_ref(e, idx)
+    return [f"mov esi, {hdr:#x}", f"mov edi, {h:#x}", f"mov ecx, {num:#x}"]
+
+
 def pe_block(e, dump, cache, specs, meta):
-    """Inventory rules for a game whose give function is called through ProcessEvent: the block finds the live object (pointer chain
-    from GWorld, or the class by name for static functions), the UFunction (class chain, FName index), the item UClass (GObjects
-    walk, FName index), builds the parameter buffer on the stack and calls ProcessEvent (re-entering the hook with the flag already
-    at 2, so it passes straight through). -> (asm lines, RegisterSymbol lines)"""
+    """Inventory rules for a game whose give function is called through ProcessEvent: per rule only its flag test and values, the walk
+    itself is shared (give_routine per function, name_routine, object_routine): 19 rules took 13194 bytes one by one (Alien) and 1399 this
+    way (Valor Mortis), small enough for code cave pools. -> (asm lines, RegisterSymbol lines)"""
     g = cache["give"]
     cat = {i["id"].lower(): i for i in cache["catalog"]}
     meta.get("process_event") or sys.exit("offsets.json has no process_event")
     meta.get("gobjects") or sys.exit("offsets.json has no gobjects")
     saved = ["rsi", "rdi", "r8", "r9", "r10", "r11"]
     code = [f"push {r}" for r in saved] + ["sub rsp, 8"] + [f"push {r}" for r in ("rbx", "r12", "r13", "r14", "r15")] + ["sub rsp, 0x78"]
+    routines = {}                                             # (owner, name) -> [label, function, chain]
     for k, iid, _ in specs:
         kind = iid.lower() if iid.startswith("$") else "item"                # $money / $expand / an item id
         fns = [x for x in ([g.get(kind[1:])] + list(g.get(kind[1:] + "_alts") or []) if kind != "item"
@@ -341,9 +388,19 @@ def pe_block(e, dump, cache, specs, meta):
                 fn, chain = f, ch
                 break
         fn or sys.exit(f"no pointer chain from GWorld reaches a {fns[0]['owner']} in this dump (take the dump in-game, in the world, not in a menu)")
-        if chain:
-            print(f"   {fn['owner']}::{fn['name']}: {chain['text']}")
-        code += _pe_one(e, dump, k, fn, chain, it, meta, cache)
+        key = (fn["owner"], fn["name"])
+        if key not in routines:
+            routines[key] = [f"peg{len(routines)}", fn, chain]
+            if chain:
+                print(f"   {fn['owner']}::{fn['name']}: {chain['text']}")
+        lim = item_limit(it)
+        code += [f"cmp byte ptr [Flag{k}], 1", f"jne pe{k}_end", f"mov byte ptr [Flag{k}], 2", f"mov edx, dword ptr [Val{k}]"] + \
+                ([f"mov eax, {lim}", "cmp edx, eax", "cmovg edx, eax"] if lim else []) + item_args(e, it, fn) + \
+                [f"call {routines[key][0]}", f"pe{k}_end:"]
+    code.append("jmp pegskip")
+    for label, fn, chain in routines.values():
+        code += give_routine(label, e, fn, chain, meta)
+    code += name_routine("pegname", e) + object_routine("pegobj", meta, e) + ["pegskip:"]
     code += ["add rsp, 0x78"] + [f"pop {r}" for r in ("r15", "r14", "r13", "r12", "rbx")] + ["add rsp, 8"] + [f"pop {r}" for r in reversed(saved)]
     return code, [f"RegisterSymbol( ProcessEvt, ModuleBase+{meta['process_event']:#x} )"] + gnames_symbol(code, meta)
 
