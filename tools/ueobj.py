@@ -483,19 +483,12 @@ class Engine:
         """FNamePool block offset bits: usually 16; if object names have block indices beyond the pool, raise."""
         if not isinstance(self.pool, NamePool):
             return
+        # highest name index of all live objects (stale slots skipped: their garbage would inflate the bits); one
+        # object whose block happens to equal the current block is no proof (PPSA30552: 14 instead of 16)
+        top = max(((self.i32(o + self.O["UObject_Name"]) or 0) & 0x7FFFFFFF for i, o in self.arr if o and self.index(o) == i), default=0)
         self.pool.block_bits = 14
-        i = self.arr.num - 1
-        while i >= 0:
-            o = self.arr.get(i)
-            i -= 1
-            if not o or self.index(o) != i + 1:     # stale slot: its garbage name index would inflate the bits
-                continue
-            blk = (self.i32(o + self.O["UObject_Name"]) or 0) >> self.pool.block_bits
-            if blk == self.pool.current_block:
-                break
-            if blk > self.pool.current_block:
-                self.pool.block_bits += 1
-                i = self.arr.num - 1
+        while top >> self.pool.block_bits > self.pool.current_block:
+            self.pool.block_bits += 1
         self.by_name = {}
         self.build_index()
 
