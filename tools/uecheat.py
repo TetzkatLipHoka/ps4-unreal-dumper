@@ -8,7 +8,8 @@
       "Items=Controller:GameplayPC_C.PlayerInventoryComponent.Inventory[15].Amount=99"     (TArray<struct> element)
       "Hp=World.OwningGameInstance:BP_MossGameInstance_C.SharedHero:BP_HeroCharacter_C.CurrentHealth=3"
                           (World.-rooted: from GWorld, for characters the controlled pawn does not reach; --find/--addr
-                           search from the pawn and from World)
+                           search from the pawn and from World; "GWorld." works too)
+      downcasts left out are added from the dump's objects ("PlayerController.Pawn.VehicleState" -> "Pawn:VBP_Car_C")
       "Hp=GameData:RmoPlayerData.@0xd8:i=999"   (@offset:type = unreflected C++ field, as --addr prints it; i/f/d/b)
     python uecheat.py <dump.bin> --find Damage [depth]   # list ready-to-use paths whose name contains the word (default depth 4)
       walks the dump's live player pawn (real component classes, downcasts added), prints path, type and dump value
@@ -44,6 +45,56 @@ def member(e, cls, prop):
             return p
         c = e.super(c)
     sys.exit(f"{e.name(cls)} has no property {prop}")
+
+
+def has_member(e, cls, prop):
+    while cls:
+        if e.member(cls, prop):
+            return True
+        cls = e.super(cls)
+
+
+def auto_cast(e, obj, segs):
+    """Add ":Class" downcasts the path leaves out, taken from the objects in the dump: a member missing on the declared
+    class but present on the instance's real class (paths from other tools: "Pawn.VehicleState" -> "Pawn:VBP_Car_C...")."""
+    segs, addr, cls = list(segs), obj, e.cls(obj) if obj else None
+    for i in range(1, len(segs) + 1):
+        if not cls or i == len(segs) or segs[i - 1][:1] in "@+" or segs[i - 1].startswith("weak:"):
+            break
+        tok = segs[i - 1]
+        name, _, cast = tok.partition(":")
+        name, _, idx = name.rstrip("]").partition("[")
+        c = cls
+        while c and not e.member(c, name):
+            c = e.super(c)
+        p = c and e.member(c, name)
+        if not p:
+            break
+        kind, a = e.ffield_class_name(p), addr + e.prop_offset(p) if addr else None
+        if kind == "StructProperty":
+            cls = e.ptr(p + e.O["StructProperty_Struct"])
+        elif idx and kind == "ArrayProperty":
+            inner = e.ptr(p + e.O["ArrayProperty_Inner"])
+            data = a and e.ptr(a)
+            if e.ffield_class_name(inner) == "StructProperty":
+                cls = e.ptr(inner + e.O["StructProperty_Struct"])
+                a = data and data + int(idx, 0) * e.prop_size(inner)
+            else:
+                cls, a = e.ptr(inner + e.O["ObjectProperty_Class"]), data and e.ptr(data + 8 * int(idx, 0))
+                a = ("obj", a)
+        elif kind in ("ObjectProperty", "WeakObjectProperty"):
+            cls, a = e.ptr(p + e.O["ObjectProperty_Class"]), ("obj", a and e.ptr(a))
+        else:
+            break
+        if isinstance(a, tuple):                                  # object hop: declared class, cast if the next member needs it
+            a = a[1]
+            if cast:
+                cls = cls_of(e, cast)
+            elif a and e.cls(a) and not has_member(e, cls, segs[i].partition(":")[0].partition("[")[0]):
+                cls = e.cls(a)
+                segs[i - 1] = f"{tok}:{e.name(cls)}"
+        addr = a
+    return segs
 
 
 def func_in(e, cls, name):
@@ -355,6 +406,8 @@ def main(dump, out, *specs):
     cheats, pawn_blocks, world_blocks, mems, syms, item_specs = [], [], [], [], [], []
     for k, spec in enumerate(specs or DEFAULT, 1):
         name, path, value = spec.split("=", 2)
+        if path.startswith("GWorld."):                            # same root, as other tools write it
+            path = path[1:]
         mems.append(f"GetMem( Flag{k}, 1 )")
         entries = [f"      <Symbol>Flag{k}</Symbol>\n      <Type>Value</Type>\n      <ValueType>Boolean</ValueType>\n      <Value>0</Value>"]
         if path.startswith("item:"):                              # inventory rule (ueitems): "Name=item:ITEM_ID=amount" / "item:$money" / "item:$expand" (inventory to max)
@@ -391,6 +444,7 @@ def main(dump, out, *specs):
             print(f"{name}: button -> {e.fullname(fn)} impl base+{impl - e.d.base:#x}")
             continue
         segs, code = path.split("."), []                          # hops: ObjectProperty -> its class, StructProperty -> its struct
+        segs = segs[:1] + auto_cast(e, world, segs[1:]) if segs[0] == "World" else auto_cast(e, pawn, segs)
         if segs[0] == "World":                                    # World-rooted: runs before (and without) the pawn walk
             code = ["mov rcx, [GWorld]", "test rcx, rcx", f"jz c{k}_end"]
             cls, reg, pend = path_code(e, world_cls, segs[1:-1], "rcx", f"c{k}_end", code)
@@ -421,7 +475,7 @@ def main(dump, out, *specs):
         (world_blocks if segs[0] == "World" else pawn_blocks).append(
             "\n".join([f"cmp byte ptr [Flag{k}], 1", f"jne c{k}_end"] + code + [f"c{k}_end:"]))
         cheats.append((name, entries))
-        print(f"{name}: {'' if segs[0] == 'World' else 'pawn.'}{path} ({kind} +{off:#x}) = {value}")
+        print(f"{name}: {'' if segs[0] == 'World' else 'pawn.'}{'.'.join(segs)} ({kind} +{off:#x}) = {value}")
 
     if item_specs:                                              # all inventory rules share one block (own chain walk + add_item routine)
         import ueitems, ueitems_tlh

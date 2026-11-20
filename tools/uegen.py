@@ -375,7 +375,7 @@ def find_process_event(e):
     """UObject::ProcessEvent vtable index: the virtual that tests UFunction::FunctionFlags & FUNC_Native (0x400).
     Clang emits `test byte [reg+Flags+1], 4`, MSVC `test dword [reg+Flags], 0x400`, some forks
     `mov eax, [reg+Flags]; test eax, 0x4xx` or `bt eax, 10`; all accepted. Each entry is
-    scanned only up to the next vtable function so a hit inside a neighbour is not credited to a short thunk.
+    scanned only up to the next vtable function and its first ret + int3 so a hit inside a neighbour is not credited to a short thunk.
     Returns (index, address) or (None, None)."""
     import struct
     ff = e.O["UFunction_FunctionFlags"]
@@ -403,7 +403,9 @@ def find_process_event(e):
     hits = []
     for i, fn in enumerate(fns):
         nxt = next((a for a in ends if a > fn), fn + 0x1000)
-        if pat.search(e.d.read(fn, min(nxt - fn, 0x1000)) or b""):
+        code = e.d.read(fn, min(nxt - fn, 0x1000)) or b""
+        end = code.find(b"\xC3\xCC")      # ret + int3 padding: a short stub ends there (PPSA28416 slot 78 ran into its neighbours)
+        if pat.search(code[:end + 1] if end >= 0 else code):
             hits.append((i, fn))
     return hits[0] if len(hits) == 1 else (None, None)
 
