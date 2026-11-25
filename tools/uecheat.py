@@ -914,7 +914,7 @@ def main(dump, out, *specs):
             cheats.append((name, [f"      <AOB>{aob}</AOB>\n      <Type>Assembly</Type>\n      <Assembly>{xml_escape(asm)}</Assembly>"]))
             print(f"{name}: {e.name(e.outer(fn))}::{fname} body base+{impl - e.d.base:#x} ({how}) -> {asm.replace(chr(10), '; ')} (every caller)")
             continue
-        path, value = rest.split("=", 1) if not rest.startswith("call:") else (rest, "")
+        path, value = rest.split("=", 1) if not rest.startswith("call:") else (rest[:rest.rindex(")") + 1], "")      # call: takes no value (a GUI may add one)
         if path.startswith("GWorld."):                            # same root, as other tools write it
             path = path[1:]
         mems.append(f"GetMem( Flag{k}, 1 )")

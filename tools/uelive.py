@@ -79,13 +79,61 @@ def resolve(e, cls, prop):
     return None, None
 
 
+def map_hop(e, cls, tok):
+    """Name{key}[:Class] -> (hop, class after it, value property): hop ("{}", map offset, (key kind, key size, key, FName number,
+    element stride, value offset, value is an object pointer, FName number offset)). FName keys use the dump's name index: the
+    dump must come from the running session ({$n} = n)."""
+    import re, uecheat
+    m = re.fullmatch(r"(\w+)\{(.+)\}(?::(\w+))?", tok)
+    p, kp, vp, voff, stride = uecheat.map_parts(e, cls, m[1])
+    kk, key, num = e.ffield_class_name(kp), m[2].lstrip("$") if m[2].startswith("$") else m[2], 0
+    if kk == "NameProperty":
+        key, num = uecheat.name_index(e, key)
+    elif kk in uecheat.INTS:
+        key = uecheat.enum_value(e, kp, key or "0")
+    else:
+        sys.exit(f"{tok}: {kk} keys are not supported")
+    vk = e.ffield_class_name(vp)
+    obj = vk in ("ObjectProperty", "ClassProperty")
+    nxt = (e.find(m[3], CF["Class"]) if m[3] else e.ptr(vp + e.O["ObjectProperty_Class"])) if obj else \
+        e.ptr(vp + e.O["StructProperty_Struct"]) if vk == "StructProperty" else None
+    return ("{}", e.prop_offset(p), (kk, e.prop_size(kp), key, num, stride, voff, obj, e.O["FName_Number"])), nxt, vp
+
+
+def normalize(e, dump, path, pawn):
+    """GWorld. / PC. prefixes as uecheat takes them, and the downcasts a path leaves out, from the dump's objects.
+    -> (World-rooted?, path without the World. prefix)."""
+    import uecheat
+    if path.startswith("GWorld."):
+        path = path[1:]
+    if path.startswith("PC."):
+        path = "World.OwningGameInstance.LocalPlayers[0].PlayerController." + path[3:]
+    world = path.startswith("World.")
+    segs = uecheat.split_path(path[6:] if world else path)
+    meta = json.load(open(os.path.join(os.path.dirname(dump), "SDK", "offsets.json")))
+    root = e.ptr(e.d.base + meta["gworld"]) if world and meta.get("gworld") else pawn
+    return world, ".".join(uecheat.auto_cast(e, root, segs) if root else segs)
+
+
 def resolve_path(e, cls, path):
     """uecheat path syntax -> (hops, field, owner); hops are ("*" pointer | "+" inline struct | "[]" object array element
-    | "[]s" struct array element, offset, index | (index, element size))."""
-    hops, segs = [], path.split(".")
-    for tok in segs[:-1]:
+    | "[]s" struct array element | "{}" map / set element, offset, index | (index, element size) | key info).
+    [$n] reads element n, {$n} key n (the trainer's default)."""
+    import uecheat
+    hops, segs = [], uecheat.split_path(path)
+    if "{" in segs[-1]:                                          # Map{key} at the end: the value itself is the number
+        segs.append("")
+    for n, tok in enumerate(segs[:-1]):
+        if "{" in tok:
+            hop, cls, vp = map_hop(e, cls, tok)
+            hops.append(hop)
+            if not segs[-1] and n == len(segs) - 2:
+                k = e.ffield_class_name(vp)
+                return hops, (0, "ByteProperty" if k == "BoolProperty" else k), cls
+            continue
         name, _, cast = tok.partition(":")
         name, _, idx = name.rstrip("]").partition("[")
+        idx = idx.lstrip("$")
         f, _ = resolve(e, cls, name)
         if not f:
             sys.exit(f"property {name} not found in {e.name(cls)} or its supers")
@@ -128,6 +176,31 @@ async def follow(dbg, pid, a, hops):
         if op == "+":
             a += off
             continue
+        if op == "{}":                                            # TSparseArray: allocated slots (bit array) whose key matches
+            kk, ks, key, num, stride, voff, obj, numoff = i
+            hdr = await dbg.read_memory(pid, a + off, 0x38)
+            if not hdr:
+                return None
+            data, cnt = struct.unpack_from("<Qi", hdr, 0)
+            sec = struct.unpack_from("<Q", hdr, 0x20)[0]
+            bits = (await dbg.read_memory(pid, sec, (cnt + 7) // 8) if sec else hdr[0x10:0x20]) or b""
+            blob = await dbg.read_memory(pid, data, cnt * stride) if data and 0 < cnt < 0x100000 else b""
+            for j in range(cnt if blob else 0):
+                if not (j >> 3 < len(bits) and bits[j >> 3] >> (j & 7) & 1):
+                    continue
+                el = j * stride
+                if kk == "NameProperty":
+                    hit = struct.unpack_from("<i", blob, el)[0] == key and (numoff < 0 or struct.unpack_from("<i", blob, el + numoff)[0] == num)
+                else:
+                    hit = int.from_bytes(blob[el:el + ks], "little") == key & ((1 << 8 * ks) - 1)
+                if hit:
+                    a = u64(blob[el + voff:el + voff + 8]) if obj else data + el + voff
+                    break
+            else:
+                return None
+            if not a:
+                return None
+            continue
         if op in ("[]", "[]s"):
             i, es = i if op == "[]s" else (i, 8)                  # struct elements inline, object elements are pointers
             n = await dbg.read_memory(pid, a + off + 8, 4)            # TArray {Data, Num, Max}
@@ -148,16 +221,18 @@ async def follow(dbg, pid, a, hops):
 
 async def main(dump, host, cname, prop=None, value=None):
     e = ueobj.open_engine(dump, log=lambda *a: None)
-    player = None
-    world = cname.lower() == "player" and (prop or "").startswith("World.")   # uecheat World-rooted path
-    if world:
-        cname, prop = "World", prop[6:]
-    elif cname.lower() == "player":                              # the local player's pawn, whatever its class is called
+    player = world = None
+    if cname.lower() == "player":                                # the local player's pawn, whatever its class is called
         import uecheat
         player = uecheat.player_pawn(e, e.prop_offset(uecheat.member(e, uecheat.cls_of(e, "Controller"), "Pawn")))
-        if not player:
+        if prop:
+            world, prop = normalize(e, dump, prop, player)        # World. / GWorld. / PC. paths, downcasts added
+        if world:
+            cname, player = "World", None
+        elif not player:
             sys.exit("no live player pawn in this dump (dump in-game, not in a menu)")
-        cname = e.name(e.cls(player))
+        else:
+            cname = e.name(e.cls(player))
     cls = e.cls(player) if player else e.find(cname, CF["Class"])
     if not cls:
         sys.exit(f"class {cname} not found (use 'player' for the player pawn)")
@@ -232,7 +307,7 @@ async def read_many(dump, host, paths):
     player = uecheat.player_pawn(e, e.prop_offset(uecheat.member(e, uecheat.cls_of(e, "Controller"), "Pawn")))
     if not player:
         sys.exit("no live player pawn in this dump (dump in-game, not in a menu)")
-    cls = e.cls(player)
+    cls, dump_pawn = e.cls(player), player
     import ps4debug
     dbg = ps4debug.PS4Debug(host)
     pid = await ueobj.game_pid(dbg)
@@ -245,11 +320,12 @@ async def read_many(dump, host, paths):
     world = None
     for p in paths:
         try:
-            if p.startswith("World."):                           # uecheat World-rooted path: start at the live GWorld
+            w, q = normalize(e, dump, p, dump_pawn)
+            if w:                                                # uecheat World-rooted path: start at the live GWorld
                 world = world or await live_world(e, dbg, pid, dump)
-                hops, f, owner = resolve_path(e, e.find("World", CF["Class"]), p[6:])
+                hops, f, owner = resolve_path(e, e.find("World", CF["Class"]), q)
             else:
-                hops, f, owner = resolve_path(e, cls, p)
+                hops, f, owner = resolve_path(e, cls, q)
             (kind, off), mask = leaf(e, f), 0xFF
             if kind == "BoolProperty":
                 _, boff, bmask, fmask = e.bool_info(f)
@@ -259,7 +335,7 @@ async def read_many(dump, host, paths):
             if not fmt:
                 print(f"{p}\t?\t{kind} not supported")
                 continue
-            base = await follow(dbg, pid, world if p.startswith("World.") else player, hops)
+            base = await follow(dbg, pid, world if w else player, hops)
             if not base:
                 print(f"{p}\t?\tpath not set (null pointer / short array)")
                 continue
